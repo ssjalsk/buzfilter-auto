@@ -223,27 +223,33 @@ elif menu == "📝 리뷰 입력":
     st.subheader("리뷰 텍스트 파일을 업로드하면 엑셀 파일로 자동 변환합니다.")
 
     def parse_reviews(text):
-        pattern = r'(?:^|\n)\s*(\d+)\s*[.\)]\s*\n?([\s\S]*?)(?=\n\s*\d+\s*[.\)]\s*\n|$)'
-        matches = re.findall(pattern, text.strip(), re.MULTILINE)
+        # 구분 형식 4가지: 1 / 1. / 1) / (1)
+        # 숫자만 있는 줄, 또는 숫자+마침표/괄호 형태의 줄을 기준으로 분리
+        delimiter = re.compile(
+            r'^\s*(?:\((\d+)\)|(\d+)[.\)]|(\d+))\s*$',
+            re.MULTILINE
+        )
+
+        # 구분자 위치와 번호를 먼저 다 찾기
+        markers = []
+        for m in delimiter.finditer(text):
+            num = int(m.group(1) or m.group(2) or m.group(3))
+            markers.append((num, m.start(), m.end()))
+
+        if not markers:
+            return []
 
         reviews = []
-        for num, content in matches:
-            content = content.strip().strip('"').strip('\u201c').strip('\u201d').strip()
-            if content:
-                reviews.append((int(num), content))
+        for i, (num, start, end) in enumerate(markers):
+            # 이 리뷰의 내용: 구분자 끝 ~ 다음 구분자 시작
+            if i + 1 < len(markers):
+                content_raw = text[end:markers[i + 1][1]]
+            else:
+                content_raw = text[end:]
 
-        if not reviews:
-            parts = re.split(r'\n(?=\d+[\.\)])', text.strip())
-            for part in parts:
-                part = part.strip()
-                if not part:
-                    continue
-                m = re.match(r'^(\d+)[.\)]\s*([\s\S]+)', part)
-                if m:
-                    num = int(m.group(1))
-                    content = m.group(2).strip().strip('"').strip('\u201c').strip('\u201d').strip()
-                    if content:
-                        reviews.append((num, content))
+            content = content_raw.strip()
+            if content:
+                reviews.append((num, content))
 
         return sorted(reviews, key=lambda x: x[0])
 
