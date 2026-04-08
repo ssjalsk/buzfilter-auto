@@ -1,6 +1,8 @@
 streamlit
-pandas
 gspread
 oauth2client
 anthropic
+pandas
 openpyxl
+reportlab
+Pillow
