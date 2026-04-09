@@ -75,6 +75,7 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     buf = io.BytesIO()
     w, h = A4
     c = canvas.Canvas(buf, pagesize=A4)
+
     LG = colors.HexColor("#F2F2F2")
     MG = colors.HexColor("#CCCCCC")
     DG = colors.HexColor("#404040")
@@ -89,10 +90,12 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     tot = sup + vat
 
     y = h - 18*mm
-    c.setFont(fb, 28); c.setFillColor(colors.black)
+    c.setFont(fb, 28)
+    c.setFillColor(colors.black)
     c.drawCentredString(w/2, y, "견   적   서")
     y -= 10*mm
-    c.setStrokeColor(colors.black); c.setLineWidth(1.5)
+    c.setStrokeColor(colors.black)
+    c.setLineWidth(1.5)
     c.line(ML, y, MR, y)
     y -= 8*mm
 
@@ -100,13 +103,16 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     rcx, rcw = ML+PW*0.5, PW*0.5
     c.setFont(fb, 18); c.setFillColor(colors.HexColor("#1a5fa8"))
     c.drawString(ML+5*mm, bt-12*mm, "Aligo")
-    c.setFont(fb, 14); c.drawString(ML+5*mm, bt-20*mm, "Media")
+    c.setFont(fb, 14)
+    c.drawString(ML+5*mm, bt-20*mm, "Media")
 
     if stamp_path and os.path.exists(stamp_path):
-        try: c.drawImage(stamp_path, rcx-24*mm, bt-33*mm, width=22*mm, height=22*mm, mask='auto')
+        try:
+            c.drawImage(stamp_path, rcx-24*mm, bt-33*mm, width=22*mm, height=22*mm, mask='auto')
         except: pass
 
-    c.setFillColor(DG); c.rect(rcx, bt-6*mm, rcw, 6*mm, fill=1, stroke=0)
+    c.setFillColor(DG)
+    c.rect(rcx, bt-6*mm, rcw, 6*mm, fill=1, stroke=0)
     c.setFillColor(colors.white); c.setFont(fb, 10)
     c.drawCentredString(rcx+rcw/2, bt-4.5*mm, "공  급  자")
 
@@ -251,26 +257,28 @@ if menu == "🏭 버즈필터 발주":
                     prompt = f"""너는 공기청정기/가전 필터 상품 매칭 전문가야.
 발주서 상품명을 보고 상품 리스트에서 가장 잘 맞는 상품 하나를 찾아줘.
 
+[전처리 - 매칭 전에 발주명에서 아래 단어는 무시해]
+- "시리즈", "H13" 은 매칭에 사용하지 마
+
+[특수 규칙]
+- 발주명에 "3벌" 또는 "5벌" 이 포함되면 반드시 삼성 에어드레서 제품군에서만 찾아
+- "헤파필터 1+1" 은 같은 필터 2개 세트야. "헤파+탈취" 처럼 다른 종류 조합이 아니야
+- 에어드레서는 에어드레서끼리만 매칭해 (공기청정기 필터와 절대 혼동 금지)
+
 [매칭 규칙]
-- 띄어쓰기/공백 차이 무시 (헤파필터 = 헤파 필터 = 헤 파필터)
+- 띄어쓰기/공백 차이 무시 (헤파필터 = 헤파 필터)
 - 용/벌 차이 무시 (3벌용 = 3벌, 5벌용 = 5벌)
 - 브랜드가 다르면 절대 매칭하지 마
 - 모델명/시리즈명 우선 (ACL-120Z0, HC-M, CDH, R톨 등)
-- 발주명이 길어도 핵심 키워드(브랜드+시리즈+필터종류)만 추출해서 매칭해
-
-[필터 동의어 - 아래는 완전히 같은 표현이야]
-- 헤파필터 = 헤파 = 헤파1 = HEPA = H13 = 헤파필터1 (숫자는 수량이야, 종류가 아님)
-- 탈취필터 = 탈취 = 탈취1 = 탈취필터1 (숫자는 수량)
-- 기능성필터 = 기능성 = 기능성1 = 기능성2 = 기능성3 (숫자는 수량)
-- 헤파1+탈취1 = 헤파필터1+탈취필터1 = 헤파+탈취 (전부 동일)
-- 헤파1+탈취1+기능성2 = 헤파필터1+탈취필터1+기능성필터2 (전부 동일)
-- 헤파1+탈취1+기능성3 = 헤파필터1+탈취필터1+기능성필터3 (전부 동일)
+- 필터 종류가 핵심 (헤파 ≠ 탈취 ≠ 기능성 ≠ 콜게이트)
+- 발주명이 길어도 핵심 키워드(브랜드+모델+필터종류)만 추출해서 매칭해
+- 확신 없으면 미등록
 
 [매칭 예시]
-- "SK매직 ACL-120Z0 / 헤파필터1+탈취필터" → 헤파1+탈취1 조합 찾기 → sk12003
-- "코웨이 AP-0512AH / 헤파필터1+탈취필터1+기능성필터2" → 헤파1+탈취1+기능성2 → cow051203
-- "삼성 3벌 에어드레서, 헤파필터" → 3벌용 에어드레서 헤파필터
-- "위닉스 뽀송 제습기, H13 헤파필터+콜게이트" → 위닉스 뽀송 제습기 콜게이트 복합필터
+- "삼성 3벌 에어드레서 시리즈 / 헤파필터 1+1" → 브랜드:삼성, 제품:3벌용 에어드레서 헤파필터 1+1 (air302)
+- "삼성 5벌 에어드레서 / 헤파필터" → 브랜드:삼성, 제품:5벌용 에어드레서 헤파필터 (air501)
+- "위닉스 뽀송 제습기 / H13 콜게이트 복합필터" → 브랜드:위닉스, 제품:위닉스 뽀송 제습기 콜게이트 복합필터 (winxsbbo)
+- "SK매직 ACL-120Z0 / 탈취 필터1" → 브랜드:SK매직, 제품:ACL-120Z0 탈취필터 (skv12003)
 
 발주서 상품명: {raw}
 
