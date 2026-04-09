@@ -250,13 +250,76 @@ if menu == "🏭 버즈필터 발주":
             with st.spinner("AI가 상품 매칭 중..."):
                 today = datetime.now()
                 rows_to_add, match_results = [], []
+
+                # ── 텍스트 정규화 함수 ──
+                def normalize(text):
+                    import unicodedata
+                    text = str(text).lower()
+                    text = unicodedata.normalize('NFC', text)
+                    # 공백 통일
+                    text = re.sub(r'\s+', '', text)
+                    # 특수문자 제거
+                    text = re.sub(r'[^\w가-힣]', '', text)
+                    return text
+
+                # ── 1차: 텍스트 유사도로 후보 좁히기 ──
+                def get_candidates(raw_name, calc_df, top_n=10):
+                    norm_raw = normalize(raw_name)
+                    scores = []
+                    for _, r in calc_df.iterrows():
+                        norm_prod = normalize(str(r.get('제품명','')))
+                        norm_brand = normalize(str(r.get('브랜드','')))
+                        combined = norm_brand + norm_prod
+
+                        # 공통 글자 비율 계산
+                        score = 0
+                        for ch in norm_raw:
+                            if ch in combined:
+                                score += 1
+                        score = score / max(len(norm_raw), 1)
+                        scores.append((score, r))
+
+                    scores.sort(key=lambda x: x[0], reverse=True)
+                    top = [r for s, r in scores[:top_n] if s > 0]
+                    return top if top else [r for _, r in scores[:top_n]]
+
                 for idx, row in df.iterrows():
                     raw = str(row.get('상품명+옵션+개수',''))
                     qty = int(row.get('수량',1))
                     price = int(row.get('가격',0))
                     ch = str(row.get('판매처','쿠팡'))
-                    prompt = f"""너는 상품 매칭 전문가야.\n발주서 상품명: {raw}\n상품 리스트:\n{calc_df[['브랜드','제품명','상품코드 표']].to_string(index=False)}\n반드시 아래 형식으로만 답해줘:\n상품코드: [코드값]\n브랜드: [브랜드값]\n못 찾겠으면:\n상품코드: 미등록\n브랜드: 미등록"""
-                    resp = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=100, messages=[{"role":"user","content":prompt}])
+
+                    # 후보 상품만 추려서 AI에 전달 (전체 목록 대신)
+                    candidates = get_candidates(raw, calc_df, top_n=10)
+                    cand_df = pd.DataFrame(candidates)
+
+                    prompt = f"""너는 공기청정기/필터 상품 매칭 전문가야.
+
+[중요 규칙]
+- 띄어쓰기, 공백 차이는 무시해 (예: "헤파필터" = "헤파 필터" = "헤 파필터")
+- 브랜드명이 다르면 절대 매칭하지 마
+- 모델명/시리즈명이 핵심이야 (예: ACL-120Z0, CDH, R톨 등)
+- 필터 종류가 다르면 다른 상품이야 (헤파≠탈취≠기능성)
+- 확신이 없으면 반드시 미등록으로 답해
+
+발주서 상품명: {raw}
+
+후보 상품 리스트 (브랜드 / 제품명 / 상품코드):
+{cand_df[['브랜드','제품명','상품코드 표']].to_string(index=False) if '브랜드' in cand_df.columns else calc_df[['브랜드','제품명','상품코드 표']].head(10).to_string(index=False)}
+
+반드시 아래 형식으로만 답해. 다른 말 절대 금지:
+상품코드: [코드값]
+브랜드: [브랜드값]
+
+매칭 불가 시:
+상품코드: 미등록
+브랜드: 미등록"""
+
+                    resp = client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=100,
+                        messages=[{"role":"user","content":prompt}]
+                    )
                     rt = resp.content[0].text.strip()
                     mc, mb = "미등록", "미등록"
                     for line in rt.split('\n'):
