@@ -8,6 +8,7 @@ import os
 import json
 import re
 import io
+import time
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -26,25 +27,22 @@ LG_SERIES_MAP = {
 SKIP_NUMBER_CHECK = ['퓨리케어', '뽀송', '에어드레서', '스톰', 'R톨']
 SKIP_NUMBER_BRANDS = ['SK매직']
 
-# SK매직 모델명 → 코드 하드코딩 매핑
 SK_MODEL_MAP = {
-    'ACL-V15':   {'헤파':  'skv1501', '탈취':  'skv1502', '더스트': 'skv1503', '헤파+탈취+더스트': 'skv1504'},
-    'ACL-V20':   {'헤파':  'skv2001', '탈취':  'skv2002', '더스트': 'skv2003', '헤파+탈취+더스트': 'skv2004'},
-    'ACL-V16':   {'헤파':  'skv1601', '탈취':  'skv1602', '더스트': 'skv1603', '헤파+탈취+더스트': 'skv1604'},
-    'ACL-170Z0': {'헤파':  'sk17001', '탈취':  'sk17002', '헤파+탈취': 'sk17003'},
-    'ACL-120Z0': {'헤파':  'sk12001', '탈취':  'sk12002', '헤파+탈취': 'sk12003'},
-    'ACL-140':   {'헤파':  'sk14001', '탈취':  'sk14002', '더스트': 'sk14003', '헤파+탈취+더스트': 'sk14004'},
-    'ACL-V09':   {'헤파':  'skv0901', '탈취':  'skv0902', '더스트': 'skv0903', '헤파+탈취+더스트': 'skv0904'},
+    'ACL-V15':   {'헤파': 'skv1501', '탈취': 'skv1502', '더스트': 'skv1503', '헤파+탈취+더스트': 'skv1504'},
+    'ACL-V20':   {'헤파': 'skv2001', '탈취': 'skv2002', '더스트': 'skv2003', '헤파+탈취+더스트': 'skv2004'},
+    'ACL-V16':   {'헤파': 'skv1601', '탈취': 'skv1602', '더스트': 'skv1603', '헤파+탈취+더스트': 'skv1604'},
+    'ACL-170Z0': {'헤파': 'sk17001', '탈취': 'sk17002', '헤파+탈취': 'sk17003'},
+    'ACL-120Z0': {'헤파': 'sk12001', '탈취': 'sk12002', '헤파+탈취': 'sk12003'},
+    'ACL-140':   {'헤파': 'sk14001', '탈취': 'sk14002', '더스트': 'sk14003', '헤파+탈취+더스트': 'sk14004'},
+    'ACL-V09':   {'헤파': 'skv0901', '탈취': 'skv0902', '더스트': 'skv0903', '헤파+탈취+더스트': 'skv0904'},
 }
 
 def match_sk_magic(raw_name):
-    """SK매직 모델명 직접 매핑"""
     for model, filter_map in SK_MODEL_MAP.items():
         if model in raw_name:
-            # 필터 종류 판별
-            has_hepa  = '헤파' in raw_name
-            has_odor  = '탈취' in raw_name
-            has_dust  = '더스트' in raw_name
+            has_hepa = '헤파' in raw_name
+            has_odor = '탈취' in raw_name
+            has_dust = '더스트' in raw_name
             if has_hepa and has_odor and has_dust:
                 return filter_map.get('헤파+탈취+더스트', '미등록')
             elif has_hepa and has_odor:
@@ -56,7 +54,7 @@ def match_sk_magic(raw_name):
             elif has_dust:
                 return filter_map.get('더스트', '미등록')
             return '미등록'
-    return None  # SK매직이지만 모델 못찾음
+    return None
 
 def detect_brand_prefix(raw_name):
     if 'LG' in raw_name or 'lg' in raw_name.lower():
@@ -128,14 +126,17 @@ def find_last_data_row(sheet):
 def insert_row_safe(sheet, start_row, rows_data):
     for i, row in enumerate(rows_data):
         r = start_row + i
-        sheet.update(f"B{r}", [[row[0]]], value_input_option='USER_ENTERED')
-        sheet.update(f"C{r}", [[row[1]]], value_input_option='USER_ENTERED')
-        sheet.update(f"D{r}", [[row[2]]], value_input_option='USER_ENTERED')
-        sheet.update(f"E{r}", [[row[3]]], value_input_option='USER_ENTERED')
-        sheet.update(f"F{r}", [[row[4]]], value_input_option='USER_ENTERED')
-        sheet.update(f"H{r}", [[row[5]]], value_input_option='USER_ENTERED')
-        sheet.update(f"I{r}", [[row[6]]], value_input_option='USER_ENTERED')
-        sheet.update(f"K{r}", [[row[7]]], value_input_option='USER_ENTERED')
+        sheet.batch_update([
+            {'range': f'B{r}', 'values': [[row[0]]]},
+            {'range': f'C{r}', 'values': [[row[1]]]},
+            {'range': f'D{r}', 'values': [[row[2]]]},
+            {'range': f'E{r}', 'values': [[row[3]]]},
+            {'range': f'F{r}', 'values': [[row[4]]]},
+            {'range': f'H{r}', 'values': [[row[5]]]},
+            {'range': f'I{r}', 'values': [[row[6]]]},
+            {'range': f'K{r}', 'values': [[row[7]]]},
+        ], value_input_option='USER_ENTERED')
+        time.sleep(0.5)
 
 def generate_quote_pdf(quote_data, stamp_path=None):
     from reportlab.lib.pagesizes import A4
@@ -321,14 +322,14 @@ if menu == "🏭 버즈필터 발주":
                     price = int(row.get('가격',0))
                     ch = str(row.get('판매처','쿠팡'))
 
-                    # ── SK매직 하드코딩 매핑 먼저 체크 ──
+                    # ── SK매직 하드코딩 먼저 체크 ──
                     if 'SK매직' in raw:
                         sk_code = match_sk_magic(raw)
                         if sk_code and sk_code != '미등록':
                             mc, mb = sk_code, 'SK매직'
                             match_results.append({'상품명':raw,'매칭 브랜드':mb,'매칭 코드':mc,'판매처':ch,'가격':price,'수량':qty})
                             rows_to_add.append([str(today.year),str(today.month),str(today.day),mb,mc,ch,price,qty])
-                            continue  # AI 건너뜀
+                            continue
 
                     # ── 일반 AI 매칭 ──
                     prompt = f"""너는 공기청정기/가전 필터 상품 매칭 전문가야.
