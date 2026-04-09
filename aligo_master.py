@@ -26,6 +26,38 @@ LG_SERIES_MAP = {
 SKIP_NUMBER_CHECK = ['퓨리케어', '뽀송', '에어드레서', '스톰', 'R톨']
 SKIP_NUMBER_BRANDS = ['SK매직']
 
+# SK매직 모델명 → 코드 하드코딩 매핑
+SK_MODEL_MAP = {
+    'ACL-V15':   {'헤파':  'skv1501', '탈취':  'skv1502', '더스트': 'skv1503', '헤파+탈취+더스트': 'skv1504'},
+    'ACL-V20':   {'헤파':  'skv2001', '탈취':  'skv2002', '더스트': 'skv2003', '헤파+탈취+더스트': 'skv2004'},
+    'ACL-V16':   {'헤파':  'skv1601', '탈취':  'skv1602', '더스트': 'skv1603', '헤파+탈취+더스트': 'skv1604'},
+    'ACL-170Z0': {'헤파':  'sk17001', '탈취':  'sk17002', '헤파+탈취': 'sk17003'},
+    'ACL-120Z0': {'헤파':  'sk12001', '탈취':  'sk12002', '헤파+탈취': 'sk12003'},
+    'ACL-140':   {'헤파':  'sk14001', '탈취':  'sk14002', '더스트': 'sk14003', '헤파+탈취+더스트': 'sk14004'},
+    'ACL-V09':   {'헤파':  'skv0901', '탈취':  'skv0902', '더스트': 'skv0903', '헤파+탈취+더스트': 'skv0904'},
+}
+
+def match_sk_magic(raw_name):
+    """SK매직 모델명 직접 매핑"""
+    for model, filter_map in SK_MODEL_MAP.items():
+        if model in raw_name:
+            # 필터 종류 판별
+            has_hepa  = '헤파' in raw_name
+            has_odor  = '탈취' in raw_name
+            has_dust  = '더스트' in raw_name
+            if has_hepa and has_odor and has_dust:
+                return filter_map.get('헤파+탈취+더스트', '미등록')
+            elif has_hepa and has_odor:
+                return filter_map.get('헤파+탈취', filter_map.get('헤파+탈취+더스트', '미등록'))
+            elif has_hepa:
+                return filter_map.get('헤파', '미등록')
+            elif has_odor:
+                return filter_map.get('탈취', '미등록')
+            elif has_dust:
+                return filter_map.get('더스트', '미등록')
+            return '미등록'
+    return None  # SK매직이지만 모델 못찾음
+
 def detect_brand_prefix(raw_name):
     if 'LG' in raw_name or 'lg' in raw_name.lower():
         for series, prefix in LG_SERIES_MAP.items():
@@ -48,8 +80,7 @@ def should_skip_number_check(raw_name):
     return False
 
 def validate_code(raw_name, ai_code):
-    """AI 매칭 코드 2차 검증 - 브랜드 접두사 + 모델번호 체크"""
-    if ai_code == '미등록':
+    if '미등록' in ai_code:
         return True, 'AI 미등록 처리'
     prefix = detect_brand_prefix(raw_name)
     if prefix:
@@ -113,7 +144,6 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     from reportlab.pdfgen import canvas
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
-
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     fr = os.path.join(BASE_DIR, 'NotoSansKR-Regular.ttf')
     fb_path = os.path.join(BASE_DIR, 'NotoSansKR-Bold.ttf')
@@ -124,7 +154,6 @@ def generate_quote_pdf(quote_data, stamp_path=None):
         fn, fb = 'KR', 'KR-B'
     else:
         fn, fb = 'Helvetica', 'Helvetica-Bold'
-
     buf = io.BytesIO()
     w, h = A4
     c = canvas.Canvas(buf, pagesize=A4)
@@ -292,6 +321,16 @@ if menu == "🏭 버즈필터 발주":
                     price = int(row.get('가격',0))
                     ch = str(row.get('판매처','쿠팡'))
 
+                    # ── SK매직 하드코딩 매핑 먼저 체크 ──
+                    if 'SK매직' in raw:
+                        sk_code = match_sk_magic(raw)
+                        if sk_code and sk_code != '미등록':
+                            mc, mb = sk_code, 'SK매직'
+                            match_results.append({'상품명':raw,'매칭 브랜드':mb,'매칭 코드':mc,'판매처':ch,'가격':price,'수량':qty})
+                            rows_to_add.append([str(today.year),str(today.month),str(today.day),mb,mc,ch,price,qty])
+                            continue  # AI 건너뜀
+
+                    # ── 일반 AI 매칭 ──
                     prompt = f"""너는 공기청정기/가전 필터 상품 매칭 전문가야.
 발주서 상품명을 보고 상품 리스트에서 가장 잘 맞는 상품 하나를 찾아줘.
 
@@ -307,9 +346,8 @@ if menu == "🏭 버즈필터 발주":
 - 띄어쓰기/공백 차이 무시 (헤파필터 = 헤파 필터)
 - 용/벌 차이 무시 (3벌용 = 3벌, 5벌용 = 5벌)
 - 브랜드가 다르면 절대 매칭하지 마
-- 모델명/시리즈명 우선 (AP-0512, AP-1013, LA-P, LA-Q 등)
+- 모델명/시리즈명 우선
 - 필터 종류가 핵심 (헤파 ≠ 탈취 ≠ 기능성 ≠ 콜게이트)
-- 발주명이 길어도 핵심 키워드(브랜드+모델+필터종류)만 추출해서 매칭해
 - 확신 없으면 미등록
 
 [매칭 예시]
@@ -350,10 +388,7 @@ if menu == "🏭 버즈필터 발주":
                         mc = '미등록(검증실패)'
                         mb = '미등록'
 
-                    match_results.append({
-                        '상품명':raw,'매칭 브랜드':mb,'매칭 코드':mc,
-                        '판매처':ch,'가격':price,'수량':qty
-                    })
+                    match_results.append({'상품명':raw,'매칭 브랜드':mb,'매칭 코드':mc,'판매처':ch,'가격':price,'수량':qty})
                     rows_to_add.append([str(today.year),str(today.month),str(today.day),mb,mc,ch,price,qty])
 
                 st.session_state['rows_to_add'] = rows_to_add
