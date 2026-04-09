@@ -75,7 +75,6 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     buf = io.BytesIO()
     w, h = A4
     c = canvas.Canvas(buf, pagesize=A4)
-
     LG = colors.HexColor("#F2F2F2")
     MG = colors.HexColor("#CCCCCC")
     DG = colors.HexColor("#404040")
@@ -90,12 +89,10 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     tot = sup + vat
 
     y = h - 18*mm
-    c.setFont(fb, 28)
-    c.setFillColor(colors.black)
+    c.setFont(fb, 28); c.setFillColor(colors.black)
     c.drawCentredString(w/2, y, "견   적   서")
     y -= 10*mm
-    c.setStrokeColor(colors.black)
-    c.setLineWidth(1.5)
+    c.setStrokeColor(colors.black); c.setLineWidth(1.5)
     c.line(ML, y, MR, y)
     y -= 8*mm
 
@@ -103,16 +100,13 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     rcx, rcw = ML+PW*0.5, PW*0.5
     c.setFont(fb, 18); c.setFillColor(colors.HexColor("#1a5fa8"))
     c.drawString(ML+5*mm, bt-12*mm, "Aligo")
-    c.setFont(fb, 14)
-    c.drawString(ML+5*mm, bt-20*mm, "Media")
+    c.setFont(fb, 14); c.drawString(ML+5*mm, bt-20*mm, "Media")
 
     if stamp_path and os.path.exists(stamp_path):
-        try:
-            c.drawImage(stamp_path, rcx-24*mm, bt-33*mm, width=22*mm, height=22*mm, mask='auto')
+        try: c.drawImage(stamp_path, rcx-24*mm, bt-33*mm, width=22*mm, height=22*mm, mask='auto')
         except: pass
 
-    c.setFillColor(DG)
-    c.rect(rcx, bt-6*mm, rcw, 6*mm, fill=1, stroke=0)
+    c.setFillColor(DG); c.rect(rcx, bt-6*mm, rcw, 6*mm, fill=1, stroke=0)
     c.setFillColor(colors.white); c.setFont(fb, 10)
     c.drawCentredString(rcx+rcw/2, bt-4.5*mm, "공  급  자")
 
@@ -262,15 +256,21 @@ if menu == "🏭 버즈필터 발주":
 - 용/벌 차이 무시 (3벌용 = 3벌, 5벌용 = 5벌)
 - 브랜드가 다르면 절대 매칭하지 마
 - 모델명/시리즈명 우선 (ACL-120Z0, HC-M, CDH, R톨 등)
-- 필터 종류가 핵심 (헤파 ≠ 탈취 ≠ 기능성 ≠ 콜게이트)
-- H13, HEPA 등 규격 표기는 같은 헤파필터로 봐
 - 발주명이 길어도 핵심 키워드(브랜드+시리즈+필터종류)만 추출해서 매칭해
 
+[필터 동의어 - 아래는 완전히 같은 표현이야]
+- 헤파필터 = 헤파 = 헤파1 = HEPA = H13 = 헤파필터1 (숫자는 수량이야, 종류가 아님)
+- 탈취필터 = 탈취 = 탈취1 = 탈취필터1 (숫자는 수량)
+- 기능성필터 = 기능성 = 기능성1 = 기능성2 = 기능성3 (숫자는 수량)
+- 헤파1+탈취1 = 헤파필터1+탈취필터1 = 헤파+탈취 (전부 동일)
+- 헤파1+탈취1+기능성2 = 헤파필터1+탈취필터1+기능성필터2 (전부 동일)
+- 헤파1+탈취1+기능성3 = 헤파필터1+탈취필터1+기능성필터3 (전부 동일)
+
 [매칭 예시]
-- "삼성 3벌 에어드레서, 헤파필터" → 브랜드:삼성, 제품:3벌용 에어드레서 헤파필터
-- "삼성 5벌 에어드레서, 헤파필터1+1" → 브랜드:삼성, 제품:5벌용 에어드레서 헤파필터 1+1
-- "위닉스 뽀송 제습기, H13 헤파필터+콜게이트" → 브랜드:위닉스, 제품:위닉스 뽀송 제습기 콜게이트 복합필터
-- "SK매직 ACL-120Z0, 탈취 필터1" → 브랜드:SK매직, 시리즈:ACL-120Z0 탈취필터
+- "SK매직 ACL-120Z0 / 헤파필터1+탈취필터" → 헤파1+탈취1 조합 찾기 → sk12003
+- "코웨이 AP-0512AH / 헤파필터1+탈취필터1+기능성필터2" → 헤파1+탈취1+기능성2 → cow051203
+- "삼성 3벌 에어드레서, 헤파필터" → 3벌용 에어드레서 헤파필터
+- "위닉스 뽀송 제습기, H13 헤파필터+콜게이트" → 위닉스 뽀송 제습기 콜게이트 복합필터
 
 발주서 상품명: {raw}
 
