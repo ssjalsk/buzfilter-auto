@@ -209,13 +209,15 @@ def generate_quote_pdf(quote_data, stamp_path=None):
 
     y -= 5*mm
     c.setFont(fb,9); c.setFillColor(colors.black)
-    c.drawString(ML, y, "▶ 입금 계좌번호 : IBK기업은행 208-174145-04-018 박철규 (알리고 미디어)")
+    if is_tax:
+        c.drawString(ML, y, "▶ 입금 계좌번호 : IBK기업은행 208-174145-04-018 박철규 (알리고 미디어)")
+    else:
+        c.drawString(ML, y, "▶ 입금 계좌번호 : 카카오뱅크 3333-02-5460626 박철규")
     y -= 6*mm
     c.drawString(ML, y, f"▶ 비  고 : {quote_data.get('memo','')}")
     c.save(); buf.seek(0)
     return buf
 
-# =====================================================
 st.set_page_config(page_title="버즈필터 자동화", page_icon="🤖", layout="wide")
 
 with st.sidebar:
@@ -226,9 +228,6 @@ with st.sidebar:
     st.caption("버즈필터 업무 자동화 시스템")
     st.caption("© 2025 알리고미디어")
 
-# =====================================================
-# 페이지 1: 버즈필터 발주
-# =====================================================
 if menu == "🏭 버즈필터 발주":
     st.title("🤖 버즈필터 발주 자동 장부 입력")
     st.subheader("📊 발주서 엑셀을 업로드하면 장부에 자동으로 입력합니다.")
@@ -250,62 +249,33 @@ if menu == "🏭 버즈필터 발주":
             with st.spinner("AI가 상품 매칭 중..."):
                 today = datetime.now()
                 rows_to_add, match_results = [], []
-
-                # ── 텍스트 정규화 함수 ──
-                def normalize(text):
-                    import unicodedata
-                    text = str(text).lower()
-                    text = unicodedata.normalize('NFC', text)
-                    # 공백 통일
-                    text = re.sub(r'\s+', '', text)
-                    # 특수문자 제거
-                    text = re.sub(r'[^\w가-힣]', '', text)
-                    return text
-
-                # ── 1차: 텍스트 유사도로 후보 좁히기 ──
-                def get_candidates(raw_name, calc_df, top_n=10):
-                    norm_raw = normalize(raw_name)
-                    scores = []
-                    for _, r in calc_df.iterrows():
-                        norm_prod = normalize(str(r.get('제품명','')))
-                        norm_brand = normalize(str(r.get('브랜드','')))
-                        combined = norm_brand + norm_prod
-
-                        # 공통 글자 비율 계산
-                        score = 0
-                        for ch in norm_raw:
-                            if ch in combined:
-                                score += 1
-                        score = score / max(len(norm_raw), 1)
-                        scores.append((score, r))
-
-                    scores.sort(key=lambda x: x[0], reverse=True)
-                    top = [r for s, r in scores[:top_n] if s > 0]
-                    return top if top else [r for _, r in scores[:top_n]]
-
                 for idx, row in df.iterrows():
                     raw = str(row.get('상품명+옵션+개수',''))
                     qty = int(row.get('수량',1))
                     price = int(row.get('가격',0))
                     ch = str(row.get('판매처','쿠팡'))
+                    prompt = f"""너는 공기청정기/가전 필터 상품 매칭 전문가야.
+발주서 상품명을 보고 상품 리스트에서 가장 잘 맞는 상품 하나를 찾아줘.
 
-                    # 후보 상품만 추려서 AI에 전달 (전체 목록 대신)
-                    candidates = get_candidates(raw, calc_df, top_n=10)
-                    cand_df = pd.DataFrame(candidates)
+[매칭 규칙]
+- 띄어쓰기/공백 차이 무시 (헤파필터 = 헤파 필터 = 헤 파필터)
+- 용/벌 차이 무시 (3벌용 = 3벌, 5벌용 = 5벌)
+- 브랜드가 다르면 절대 매칭하지 마
+- 모델명/시리즈명 우선 (ACL-120Z0, HC-M, CDH, R톨 등)
+- 필터 종류가 핵심 (헤파 ≠ 탈취 ≠ 기능성 ≠ 콜게이트)
+- H13, HEPA 등 규격 표기는 같은 헤파필터로 봐
+- 발주명이 길어도 핵심 키워드(브랜드+시리즈+필터종류)만 추출해서 매칭해
 
-                    prompt = f"""너는 공기청정기/필터 상품 매칭 전문가야.
-
-[중요 규칙]
-- 띄어쓰기, 공백 차이는 무시해 (예: "헤파필터" = "헤파 필터" = "헤 파필터")
-- 브랜드명이 다르면 절대 매칭하지 마
-- 모델명/시리즈명이 핵심이야 (예: ACL-120Z0, CDH, R톨 등)
-- 필터 종류가 다르면 다른 상품이야 (헤파≠탈취≠기능성)
-- 확신이 없으면 반드시 미등록으로 답해
+[매칭 예시]
+- "삼성 3벌 에어드레서, 헤파필터" → 브랜드:삼성, 제품:3벌용 에어드레서 헤파필터
+- "삼성 5벌 에어드레서, 헤파필터1+1" → 브랜드:삼성, 제품:5벌용 에어드레서 헤파필터 1+1
+- "위닉스 뽀송 제습기, H13 헤파필터+콜게이트" → 브랜드:위닉스, 제품:위닉스 뽀송 제습기 콜게이트 복합필터
+- "SK매직 ACL-120Z0, 탈취 필터1" → 브랜드:SK매직, 시리즈:ACL-120Z0 탈취필터
 
 발주서 상품명: {raw}
 
-후보 상품 리스트 (브랜드 / 제품명 / 상품코드):
-{cand_df[['브랜드','제품명','상품코드 표']].to_string(index=False) if '브랜드' in cand_df.columns else calc_df[['브랜드','제품명','상품코드 표']].head(10).to_string(index=False)}
+전체 상품 리스트:
+{calc_df[['브랜드','제품명','상품코드 표']].to_string(index=False)}
 
 반드시 아래 형식으로만 답해. 다른 말 절대 금지:
 상품코드: [코드값]
@@ -314,12 +284,7 @@ if menu == "🏭 버즈필터 발주":
 매칭 불가 시:
 상품코드: 미등록
 브랜드: 미등록"""
-
-                    resp = client.messages.create(
-                        model="claude-haiku-4-5-20251001",
-                        max_tokens=100,
-                        messages=[{"role":"user","content":prompt}]
-                    )
+                    resp = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=200, messages=[{"role":"user","content":prompt}])
                     rt = resp.content[0].text.strip()
                     mc, mb = "미등록", "미등록"
                     for line in rt.split('\n'):
@@ -352,9 +317,6 @@ if menu == "🏭 버즈필터 발주":
                     except Exception as e:
                         st.error(f"❌ 입력 실패: {e}")
 
-# =====================================================
-# 페이지 2: 리뷰 입력
-# =====================================================
 elif menu == "📝 리뷰 입력":
     st.title("📝 리뷰 엑셀 자동 변환기")
     st.subheader("리뷰 텍스트 파일을 업로드하면 엑셀 파일로 자동 변환합니다.")
@@ -423,9 +385,6 @@ elif menu == "📝 리뷰 입력":
             else:
                 st.error("❌ 리뷰를 파싱할 수 없습니다.")
 
-# =====================================================
-# 페이지 3: 견적서 생성
-# =====================================================
 elif menu == "📄 견적서 생성":
     st.title("📄 견적서 자동 생성")
     st.subheader("정보를 입력하면 PDF 견적서를 자동으로 만들어드립니다.")
