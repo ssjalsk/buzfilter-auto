@@ -8,91 +8,9 @@ import os
 import json
 import re
 import io
-import time
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-# =====================================================
-# 판매자 코드 2차 검증 로직
-# =====================================================
-BRAND_PREFIX = {
-    '코웨이': 'cow', '청호': 'cha', 'SK매직': 'skv',
-    '위닉스': 'winx', '쿠쿠': 'cc', '삼성': 'air',
-    '다이슨': 'dison', '원통형': 'won',
-}
-LG_SERIES_MAP = {
-    'LA-P': 'LAP', 'LA-S': 'LAS', 'LA-Q': 'LAQ',
-    'LA-U': 'LAU', 'LA-T': 'LAT', 'LA-R': 'LAR', 'LA-M': 'LAM',
-}
-SKIP_NUMBER_CHECK = ['퓨리케어', '뽀송', '에어드레서', '스톰', 'R톨']
-SKIP_NUMBER_BRANDS = ['SK매직']
-
-SK_MODEL_MAP = {
-    'ACL-V15':   {'헤파': 'skv1501', '탈취': 'skv1502', '더스트': 'skv1503', '헤파+탈취+더스트': 'skv1504'},
-    'ACL-V20':   {'헤파': 'skv2001', '탈취': 'skv2002', '더스트': 'skv2003', '헤파+탈취+더스트': 'skv2004'},
-    'ACL-V16':   {'헤파': 'skv1601', '탈취': 'skv1602', '더스트': 'skv1603', '헤파+탈취+더스트': 'skv1604'},
-    'ACL-170Z0': {'헤파': 'sk17001', '탈취': 'sk17002', '헤파+탈취': 'sk17003'},
-    'ACL-120Z0': {'헤파': 'sk12001', '탈취': 'sk12002', '헤파+탈취': 'sk12003'},
-    'ACL-140':   {'헤파': 'sk14001', '탈취': 'sk14002', '더스트': 'sk14003', '헤파+탈취+더스트': 'sk14004'},
-    'ACL-V09':   {'헤파': 'skv0901', '탈취': 'skv0902', '더스트': 'skv0903', '헤파+탈취+더스트': 'skv0904'},
-}
-
-def match_sk_magic(raw_name):
-    for model, filter_map in SK_MODEL_MAP.items():
-        if model in raw_name:
-            has_hepa = '헤파' in raw_name
-            has_odor = '탈취' in raw_name
-            has_dust = '더스트' in raw_name
-            if has_hepa and has_odor and has_dust:
-                return filter_map.get('헤파+탈취+더스트', '미등록')
-            elif has_hepa and has_odor:
-                return filter_map.get('헤파+탈취', filter_map.get('헤파+탈취+더스트', '미등록'))
-            elif has_hepa:
-                return filter_map.get('헤파', '미등록')
-            elif has_odor:
-                return filter_map.get('탈취', '미등록')
-            elif has_dust:
-                return filter_map.get('더스트', '미등록')
-            return '미등록'
-    return None
-
-def detect_brand_prefix(raw_name):
-    if 'LG' in raw_name or 'lg' in raw_name.lower():
-        for series, prefix in LG_SERIES_MAP.items():
-            if series in raw_name:
-                return prefix
-        if '퓨리케어' in raw_name:
-            return 'LGpure'
-        return 'LA'
-    for brand, prefix in BRAND_PREFIX.items():
-        if brand in raw_name:
-            return prefix
-    return None
-
-def extract_model_numbers(raw_name):
-    return re.findall(r'[A-Za-z]+[-]?(\d{3,})', raw_name)
-
-def should_skip_number_check(raw_name):
-    if any(k in raw_name for k in SKIP_NUMBER_CHECK): return True
-    if any(b in raw_name for b in SKIP_NUMBER_BRANDS): return True
-    return False
-
-def validate_code(raw_name, ai_code):
-    if '미등록' in ai_code:
-        return True, 'AI 미등록 처리'
-    prefix = detect_brand_prefix(raw_name)
-    if prefix:
-        if not ai_code.lower().startswith(prefix.lower()):
-            return False, f"브랜드 불일치(기대:{prefix})"
-    if not should_skip_number_check(raw_name):
-        nums = extract_model_numbers(raw_name)
-        if nums and not any(n in ai_code for n in nums):
-            return False, f"모델번호 불일치:{nums}"
-    return True, 'OK'
-
-# =====================================================
-# 공통 함수
-# =====================================================
 def get_anthropic_client():
     try:
         return anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
@@ -126,17 +44,14 @@ def find_last_data_row(sheet):
 def insert_row_safe(sheet, start_row, rows_data):
     for i, row in enumerate(rows_data):
         r = start_row + i
-        sheet.batch_update([
-            {'range': f'B{r}', 'values': [[row[0]]]},
-            {'range': f'C{r}', 'values': [[row[1]]]},
-            {'range': f'D{r}', 'values': [[row[2]]]},
-            {'range': f'E{r}', 'values': [[row[3]]]},
-            {'range': f'F{r}', 'values': [[row[4]]]},
-            {'range': f'H{r}', 'values': [[row[5]]]},
-            {'range': f'I{r}', 'values': [[row[6]]]},
-            {'range': f'K{r}', 'values': [[row[7]]]},
-        ], value_input_option='USER_ENTERED')
-        time.sleep(0.5)
+        sheet.update(f"B{r}", [[row[0]]], value_input_option='USER_ENTERED')
+        sheet.update(f"C{r}", [[row[1]]], value_input_option='USER_ENTERED')
+        sheet.update(f"D{r}", [[row[2]]], value_input_option='USER_ENTERED')
+        sheet.update(f"E{r}", [[row[3]]], value_input_option='USER_ENTERED')
+        sheet.update(f"F{r}", [[row[4]]], value_input_option='USER_ENTERED')
+        sheet.update(f"H{r}", [[row[5]]], value_input_option='USER_ENTERED')
+        sheet.update(f"I{r}", [[row[6]]], value_input_option='USER_ENTERED')
+        sheet.update(f"K{r}", [[row[7]]], value_input_option='USER_ENTERED')
 
 def generate_quote_pdf(quote_data, stamp_path=None):
     from reportlab.lib.pagesizes import A4
@@ -145,6 +60,7 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     from reportlab.pdfgen import canvas
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
+
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     fr = os.path.join(BASE_DIR, 'NotoSansKR-Regular.ttf')
     fb_path = os.path.join(BASE_DIR, 'NotoSansKR-Bold.ttf')
@@ -155,36 +71,51 @@ def generate_quote_pdf(quote_data, stamp_path=None):
         fn, fb = 'KR', 'KR-B'
     else:
         fn, fb = 'Helvetica', 'Helvetica-Bold'
+
     buf = io.BytesIO()
     w, h = A4
     c = canvas.Canvas(buf, pagesize=A4)
+
     LG = colors.HexColor("#F2F2F2")
     MG = colors.HexColor("#CCCCCC")
     DG = colors.HexColor("#404040")
     TBG = colors.HexColor("#D9D9D9")
     ML, MR = 20*mm, w-20*mm
     PW = MR - ML
+
     items = quote_data["items"]
     is_tax = quote_data["tax_type"] == "발행"
     sup = sum(int(it["수량"])*int(it["단가"]) for it in items)
     vat = int(sup*0.1) if is_tax else 0
     tot = sup + vat
+
     y = h - 18*mm
-    c.setFont(fb, 28); c.setFillColor(colors.black)
+    c.setFont(fb, 28)
+    c.setFillColor(colors.black)
     c.drawCentredString(w/2, y, "견   적   서")
     y -= 10*mm
-    c.setStrokeColor(colors.black); c.setLineWidth(1.5)
-    c.line(ML, y, MR, y); y -= 8*mm
-    bt = y; rcx, rcw = ML+PW*0.5, PW*0.5
+    c.setStrokeColor(colors.black)
+    c.setLineWidth(1.5)
+    c.line(ML, y, MR, y)
+    y -= 8*mm
+
+    bt = y
+    rcx, rcw = ML+PW*0.5, PW*0.5
     c.setFont(fb, 18); c.setFillColor(colors.HexColor("#1a5fa8"))
     c.drawString(ML+5*mm, bt-12*mm, "Aligo")
-    c.setFont(fb, 14); c.drawString(ML+5*mm, bt-20*mm, "Media")
+    c.setFont(fb, 14)
+    c.drawString(ML+5*mm, bt-20*mm, "Media")
+
     if stamp_path and os.path.exists(stamp_path):
-        try: c.drawImage(stamp_path, rcx-24*mm, bt-33*mm, width=22*mm, height=22*mm, mask='auto')
+        try:
+            c.drawImage(stamp_path, rcx-24*mm, bt-33*mm, width=22*mm, height=22*mm, mask='auto')
         except: pass
-    c.setFillColor(DG); c.rect(rcx, bt-6*mm, rcw, 6*mm, fill=1, stroke=0)
+
+    c.setFillColor(DG)
+    c.rect(rcx, bt-6*mm, rcw, 6*mm, fill=1, stroke=0)
     c.setFillColor(colors.white); c.setFont(fb, 10)
     c.drawCentredString(rcx+rcw/2, bt-4.5*mm, "공  급  자")
+
     srows = [("등록번호","161-22-02310","대표자","박철규"),("상  호","알리고미디어","",""),
              ("주  소","서울 마포구 양화로64, 8층","",""),("연락처","010-9469-2381","",""),
              ("업  태","전문, 서비스업","종 목","광고대행업")]
@@ -201,6 +132,7 @@ def generate_quote_pdf(quote_data, stamp_path=None):
         if k2:
             c.setFont(fb,8); c.drawString(rcx+rcw*0.62, ry+1.5*mm, k2)
             c.setFont(fn,8); c.drawString(rcx+rcw*0.62+10*mm, ry+1.5*mm, v2)
+
     y = bt-6*mm-len(srows)*rh-5*mm
     c.setStrokeColor(MG); c.setLineWidth(0.5)
     c.setFillColor(LG); c.rect(ML, y-6*mm, 28*mm, 6*mm, fill=1, stroke=1)
@@ -222,6 +154,7 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     c.setFont(fn,7.5); c.setFillColor(colors.black)
     c.drawCentredString(ax2+PW/4, y-4.5*mm, "208-174145-04-018 박철규 (알리고 미디어)")
     y -= 8*mm
+
     c.setFillColor(TBG); c.rect(ML, y-12*mm, PW*0.38, 12*mm, fill=1, stroke=1)
     c.setFillColor(colors.black); c.setFont(fb,11)
     c.drawCentredString(ML+PW*0.19, y-6*mm, "합계금액")
@@ -234,6 +167,7 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     c.setFillColor(colors.black); c.setFont(fb,9)
     c.drawCentredString(ML+PW*0.925, y-7*mm, f"₩{tot:,}")
     y -= 14*mm
+
     cx = [ML, ML+12*mm, ML+70*mm, ML+105*mm, ML+118*mm, ML+136*mm, ML+154*mm]
     cw = [12*mm,58*mm,35*mm,13*mm,18*mm,18*mm]; cw.append(MR-cx[-1])
     labels = ["NO","품목","구성","수량","단가","공급가액(VAT별도)","비고"]
@@ -243,6 +177,7 @@ def generate_quote_pdf(quote_data, stamp_path=None):
         c.drawCentredString(cx[i]+cw[i]/2, y-4.5*mm, lbl)
         if i>0: c.setLineWidth(0.5); c.line(cx[i],y,cx[i],y-6*mm)
     y -= 6*mm
+
     max_r = max(len(items),10); rh2=6*mm
     for i in range(max_r):
         c.setFillColor(LG if i%2==0 else colors.white)
@@ -263,6 +198,7 @@ def generate_quote_pdf(quote_data, stamp_path=None):
             c.drawRightString(cx[5]+cw[5]-1*mm, y-4.5*mm, "0")
         for j in range(1,len(cx)): c.setLineWidth(0.3); c.line(cx[j],y,cx[j],y-rh2)
         y -= rh2
+
     sums = [("공급가액 합계",sup),("세  액 (VAT)",vat),("합  계(부가세 포함)",tot)] if is_tax else [("공급가액 합계 (VAT 미발행)",sup)]
     for lbl,amt in sums:
         c.setFillColor(TBG); c.rect(ML, y-7*mm, PW, 7*mm, fill=1, stroke=1)
@@ -270,12 +206,10 @@ def generate_quote_pdf(quote_data, stamp_path=None):
         c.drawCentredString(ML+PW*0.5, y-4.8*mm, lbl)
         c.drawRightString(cx[5]+cw[5]-1*mm, y-4.8*mm, f"{amt:,}")
         y -= 7*mm
+
     y -= 5*mm
     c.setFont(fb,9); c.setFillColor(colors.black)
-    if is_tax:
-        c.drawString(ML, y, "▶ 입금 계좌번호 : IBK기업은행 208-174145-04-018 박철규 (알리고 미디어)")
-    else:
-        c.drawString(ML, y, "▶ 입금 계좌번호 : 카카오뱅크 3333-02-5460626 박철규")
+    c.drawString(ML, y, "▶ 입금 계좌번호 : IBK기업은행 208-174145-04-018 박철규 (알리고 미디어)")
     y -= 6*mm
     c.drawString(ML, y, f"▶ 비  고 : {quote_data.get('memo','')}")
     c.save(); buf.seek(0)
@@ -321,87 +255,25 @@ if menu == "🏭 버즈필터 발주":
                     qty = int(row.get('수량',1))
                     price = int(row.get('가격',0))
                     ch = str(row.get('판매처','쿠팡'))
-
-                    # ── SK매직 하드코딩 먼저 체크 ──
-                    if 'SK매직' in raw:
-                        sk_code = match_sk_magic(raw)
-                        if sk_code and sk_code != '미등록':
-                            mc, mb = sk_code, 'SK매직'
-                            match_results.append({'상품명':raw,'매칭 브랜드':mb,'매칭 코드':mc,'판매처':ch,'가격':price,'수량':qty})
-                            rows_to_add.append([str(today.year),str(today.month),str(today.day),mb,mc,ch,price,qty])
-                            continue
-
-                    # ── 일반 AI 매칭 ──
-                    prompt = f"""너는 공기청정기/가전 필터 상품 매칭 전문가야.
-발주서 상품명을 보고 상품 리스트에서 가장 잘 맞는 상품 하나를 찾아줘.
-
-[전처리 - 매칭 전에 발주명에서 아래 단어는 무시해]
-- "시리즈", "H13" 은 매칭에 사용하지 마
-
-[특수 규칙]
-- 발주명에 "3벌" 또는 "5벌" 이 포함되면 반드시 삼성 에어드레서 제품군에서만 찾아
-- "헤파필터 1+1" 은 같은 필터 2개 세트야. "헤파+탈취" 처럼 다른 종류 조합이 아니야
-- 에어드레서는 에어드레서끼리만 매칭해 (공기청정기 필터와 절대 혼동 금지)
-
-[매칭 규칙]
-- 띄어쓰기/공백 차이 무시 (헤파필터 = 헤파 필터)
-- 용/벌 차이 무시 (3벌용 = 3벌, 5벌용 = 5벌)
-- 브랜드가 다르면 절대 매칭하지 마
-- 모델명/시리즈명 우선
-- 필터 종류가 핵심 (헤파 ≠ 탈취 ≠ 기능성 ≠ 콜게이트)
-- 확신 없으면 미등록
-
-[매칭 예시]
-- "삼성 3벌 에어드레서 시리즈 / 헤파필터 1+1" → air302
-- "삼성 5벌 에어드레서 / 헤파필터" → air501
-- "위닉스 뽀송 시리즈 / H13 콜게이트 복합필터" → winxsbbo
-- "코웨이 AP-0512AH / 헤파1+탈취1+기능성2" → cow051203
-- "LG LA-P 시리즈 / 헤파필터" → LAP01
-- "LG 퓨리케어360 / H13헤파+우레탄" → LGpure01
-
-발주서 상품명: {raw}
-
-전체 상품 리스트:
-{calc_df[['브랜드','제품명','상품코드 표']].to_string(index=False)}
-
-반드시 아래 형식으로만 답해. 다른 말 절대 금지:
-상품코드: [코드값]
-브랜드: [브랜드값]
-
-매칭 불가 시:
-상품코드: 미등록
-브랜드: 미등록"""
-
-                    resp = client.messages.create(
-                        model="claude-haiku-4-5-20251001",
-                        max_tokens=200,
-                        messages=[{"role":"user","content":prompt}]
-                    )
+                    prompt = f"""너는 상품 매칭 전문가야.\n발주서 상품명: {raw}\n상품 리스트:\n{calc_df[['브랜드','제품명','상품코드 표']].to_string(index=False)}\n반드시 아래 형식으로만 답해줘:\n상품코드: [코드값]\n브랜드: [브랜드값]\n못 찾겠으면:\n상품코드: 미등록\n브랜드: 미등록"""
+                    resp = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=100, messages=[{"role":"user","content":prompt}])
                     rt = resp.content[0].text.strip()
                     mc, mb = "미등록", "미등록"
                     for line in rt.split('\n'):
                         if '상품코드:' in line: mc = line.split('상품코드:')[1].strip()
                         if '브랜드:' in line: mb = line.split('브랜드:')[1].strip()
-
-                    # ── 2차 검증 ──
-                    is_valid, reason = validate_code(raw, mc)
-                    if not is_valid:
-                        mc = '미등록(검증실패)'
-                        mb = '미등록'
-
                     match_results.append({'상품명':raw,'매칭 브랜드':mb,'매칭 코드':mc,'판매처':ch,'가격':price,'수량':qty})
-                    rows_to_add.append([str(today.year),str(today.month),str(today.day),mb,mc,ch,price,qty])
-
+                    # ✅ 수정: 날짜에 년, 월, 일 텍스트 추가
+                    rows_to_add.append([f"{today.year}년",f"{today.month}월",f"{today.day}일",mb,mc,ch,price,qty])
                 st.session_state['rows_to_add'] = rows_to_add
                 st.session_state['match_results'] = match_results
                 st.session_state['ready_to_insert'] = True
             st.success("✅ AI 매칭 완료!")
-
         if st.session_state.get('ready_to_insert'):
             rdf = pd.DataFrame(st.session_state['match_results'])
             st.write("🔍 AI 매칭 결과:"); st.dataframe(rdf)
-            unm = rdf[rdf['매칭 코드'].str.contains('미등록', na=False)]
-            if len(unm) > 0: st.warning(f"⚠️ {len(unm)}건 매칭 실패 (수동 확인 필요)")
+            unm = rdf[rdf['매칭 코드']=='미등록']
+            if len(unm) > 0: st.warning(f"⚠️ {len(unm)}건 매칭 실패")
             if st.button("✅ 확인했습니다. 장부에 최종 입력합니다."):
                 with st.spinner("장부 입력 중..."):
                     try:
@@ -495,19 +367,24 @@ elif menu == "📝 리뷰 입력":
 elif menu == "📄 견적서 생성":
     st.title("📄 견적서 자동 생성")
     st.subheader("정보를 입력하면 PDF 견적서를 자동으로 만들어드립니다.")
+
     col1, col2, col3 = st.columns(3)
     with col1: client_name = st.text_input("고객사명", placeholder="예) 지케이라이프")
     with col2: quote_date = st.text_input("견적일", value=datetime.now().strftime("%Y. %m. %d"))
     with col3: tax_type = st.radio("계산서 발행 여부", ["발행", "미발행"], horizontal=True)
     memo = st.text_input("비고 (선택)", placeholder="예) 패키지 할인 포함")
+
     st.markdown("---")
     st.markdown("### 📋 항목 입력")
     st.caption("➕ 항목 추가 버튼으로 행을 늘리고, 🗑️ 버튼으로 삭제하세요.")
+
     if 'quote_items' not in st.session_state:
         st.session_state.quote_items = [{"품목":"","구성":"","수량":1,"단가":0,"비고":""}]
+
     hcols = st.columns([3,2,1,2,2,1])
     for col,lbl in zip(hcols,["**품목**","**구성**","**수량**","**단가(원)**","**공급가액**","**삭제**"]):
         col.markdown(lbl)
+
     to_del = []
     for i,item in enumerate(st.session_state.quote_items):
         cols = st.columns([3,2,1,2,2,1])
@@ -518,16 +395,20 @@ elif menu == "📄 견적서 생성":
         sp = item["수량"] * item["단가"]
         cols[4].markdown(f"<div style='padding:8px 0;font-weight:bold;'>₩{sp:,}</div>", unsafe_allow_html=True)
         if cols[5].button("🗑️", key=f"d{i}"): to_del.append(i)
+
     for i in sorted(to_del, reverse=True): st.session_state.quote_items.pop(i)
     if to_del: st.rerun()
+
     if st.button("➕ 항목 추가"):
         st.session_state.quote_items.append({"품목":"","구성":"","수량":1,"단가":0,"비고":""})
         st.rerun()
+
     st.markdown("---")
     valid = [it for it in st.session_state.quote_items if it["품목"].strip()]
     sup = sum(it["수량"]*it["단가"] for it in valid)
     vat = int(sup*0.1) if tax_type=="발행" else 0
     tot = sup + vat
+
     mc1,mc2,mc3 = st.columns(3)
     mc1.metric("공급가액 합계", f"₩{sup:,}")
     if tax_type == "발행":
@@ -536,6 +417,7 @@ elif menu == "📄 견적서 생성":
     else:
         mc2.metric("계산서", "미발행")
         mc3.metric("최종 합계 (VAT 없음)", f"₩{tot:,}")
+
     st.markdown("---")
     if st.button("📄 견적서 PDF 생성", type="primary", use_container_width=True):
         if not client_name.strip():
