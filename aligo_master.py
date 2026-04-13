@@ -8,6 +8,8 @@ import os
 import json
 import re
 import io
+import requests
+import zipfile
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -216,12 +218,50 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     return buf
 
 # =====================================================
+# Netlify 자동 배포 함수
+# =====================================================
+def deploy_to_netlify(html_content, site_id, token):
+    """수정된 HTML을 Netlify에 자동 배포"""
+    try:
+        # ZIP 파일로 패키징
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr('index.html', html_content.encode('utf-8'))
+        zip_buffer.seek(0)
+
+        # Netlify API 호출
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/zip'
+        }
+        response = requests.post(
+            f'https://api.netlify.com/api/v1/sites/{site_id}/deploys',
+            headers=headers,
+            data=zip_buffer.getvalue(),
+            timeout=60
+        )
+
+        if response.status_code in [200, 201]:
+            data = response.json()
+            return True, data.get('deploy_url') or data.get('url') or 'https://aligomedia.co.kr'
+        else:
+            return False, f"오류 코드: {response.status_code} / {response.text[:200]}"
+
+    except Exception as e:
+        return False, str(e)
+
+# =====================================================
 st.set_page_config(page_title="버즈필터 자동화", page_icon="🤖", layout="wide")
 
 with st.sidebar:
     st.markdown("## 📋 메뉴")
     st.markdown("---")
-    menu = st.radio("", options=["🏭 버즈필터 발주", "📝 리뷰 입력", "📄 견적서 생성"], label_visibility="collapsed")
+    menu = st.radio("", options=[
+        "🏭 버즈필터 발주",
+        "📝 리뷰 입력",
+        "📄 견적서 생성",
+        "🌐 홈페이지 자동 개선"
+    ], label_visibility="collapsed")
     st.markdown("---")
     st.caption("버즈필터 업무 자동화 시스템")
     st.caption("© 2025 알리고미디어")
@@ -263,7 +303,6 @@ if menu == "🏭 버즈필터 발주":
                         if '상품코드:' in line: mc = line.split('상품코드:')[1].strip()
                         if '브랜드:' in line: mb = line.split('브랜드:')[1].strip()
                     match_results.append({'상품명':raw,'매칭 브랜드':mb,'매칭 코드':mc,'판매처':ch,'가격':price,'수량':qty})
-                    # ✅ 수정: 날짜에 년, 월, 일 텍스트 추가
                     rows_to_add.append([f"{today.year}년",f"{today.month}월",f"{today.day}일",mb,mc,ch,price,qty])
                 st.session_state['rows_to_add'] = rows_to_add
                 st.session_state['match_results'] = match_results
@@ -438,3 +477,202 @@ elif menu == "📄 견적서 생성":
                 except Exception as e:
                     st.error(f"❌ PDF 생성 실패: {e}")
                     st.info("💡 NotoSansKR-Regular.ttf, NotoSansKR-Bold.ttf 파일이 같은 폴더에 있는지 확인해주세요!")
+
+# =====================================================
+# 페이지 4: 홈페이지 자동 개선
+# =====================================================
+elif menu == "🌐 홈페이지 자동 개선":
+    st.title("🌐 홈페이지 자동 개선")
+    st.subheader("index.html을 업로드하면 Claude가 분석·수정하고 Netlify에 자동 배포합니다.")
+
+    # Netlify 설정 확인
+    try:
+        NETLIFY_TOKEN = st.secrets["NETLIFY_TOKEN"]
+        NETLIFY_SITE_ID = st.secrets["NETLIFY_SITE_ID"]
+        netlify_ready = True
+    except:
+        netlify_ready = False
+
+    if not netlify_ready:
+        st.warning("⚠️ Netlify 자동 배포를 사용하려면 secrets.toml에 NETLIFY_TOKEN과 NETLIFY_SITE_ID를 추가하세요.")
+        st.code("""
+# .streamlit/secrets.toml 에 추가
+NETLIFY_TOKEN = "nfp_xgREqCKFtHYA5iNKPR3t1VDDDW1cihZD99a6"
+NETLIFY_SITE_ID = "57340c83-2554-459c-9a49-b29fbdb9b0c0"
+        """, language="toml")
+
+    st.markdown("---")
+
+    # ── 체크 항목 선택 ──────────────────────────────
+    st.markdown("### ✅ 개선 항목 선택")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        check_mobile = st.checkbox("📱 모바일 최적화", value=True)
+    with col2:
+        check_responsive = st.checkbox("📐 반응형 디자인", value=True)
+    with col3:
+        check_seo = st.checkbox("🔍 구글 SEO", value=True)
+
+    check_extra = st.text_area(
+        "📝 추가 요청사항 (선택)",
+        placeholder="예) 버튼 색상을 더 눈에 띄게 바꿔줘 / CTA 문구를 더 강하게 수정해줘",
+        height=80
+    )
+
+    st.markdown("---")
+
+    # ── 파일 업로드 ──────────────────────────────────
+    st.markdown("### 📂 HTML 파일 업로드")
+    uploaded_html = st.file_uploader("index.html 파일을 업로드하세요", type=["html", "htm"])
+
+    if uploaded_html:
+        html_content = uploaded_html.read().decode("utf-8", errors="ignore")
+
+        with st.expander("📄 업로드된 HTML 미리보기 (원본)", expanded=False):
+            st.code(html_content[:2000] + ("\n\n... (이하 생략)" if len(html_content) > 2000 else ""), language="html")
+
+        st.info(f"📊 파일 크기: {len(html_content):,}자 | 파일명: {uploaded_html.name}")
+
+        if not any([check_mobile, check_responsive, check_seo, check_extra.strip()]):
+            st.warning("⚠️ 개선 항목을 최소 1개 이상 선택해주세요.")
+        else:
+            if st.button("🚀 Claude가 분석하고 Netlify에 자동 배포", type="primary", use_container_width=True):
+
+                # ── 프롬프트 구성 ────────────────────────────
+                check_list = []
+                if check_mobile:
+                    check_list.append("""1. 모바일 최적화
+   - 터치 타겟 최소 44px 확보 (버튼, 링크)
+   - iOS 폰트 자동 확대 방지 (-webkit-text-size-adjust)
+   - 햄버거 메뉴 (768px 이하)
+   - 모바일에서 CTA 버튼 풀 너비""")
+                if check_responsive:
+                    check_list.append("""2. 반응형 디자인
+   - 브레이크포인트 3단계: 900px / 768px / 480px
+   - clamp()로 폰트 유동적 조절
+   - 그리드 2열 → 1열 자동 전환
+   - 프로세스 카드 5열 → 3열 → 2열""")
+                if check_seo:
+                    check_list.append("""3. 구글 SEO
+   - og:image 절대경로로 수정 (https://aligomedia.co.kr/image_4.png)
+   - LocalBusiness + Service 구조화 데이터 추가
+   - <main> 태그로 주요 콘텐츠 감싸기
+   - <address> 태그로 사업자 정보 시맨틱 처리
+   - 이미지 alt 텍스트 구체화
+   - loading="lazy" 이미지에 추가
+   - window.stop() 제거 (Core Web Vitals 저해)
+   - 외부 링크에 rel="noopener noreferrer" 추가
+   - Twitter Card 메타태그 추가""")
+                if check_extra.strip():
+                    check_list.append(f"4. 추가 요청사항\n   {check_extra.strip()}")
+
+                prompt = f"""너는 웹 개발 전문가야. 아래 HTML 코드를 분석하고 직접 수정해서 완성된 HTML 코드만 반환해줘.
+
+[개선 항목]
+{chr(10).join(check_list)}
+
+[주의사항]
+- 반드시 수정된 HTML 전체 코드만 반환해 (설명, 마크다운 코드블록 없이 <!DOCTYPE html>부터 시작)
+- 기존 디자인, 색상, 브랜드 정체성은 유지
+- 기존 기능(카운터 애니메이션, 관리자 시크릿 클릭)은 그대로 유지
+- 한국어 텍스트는 수정하지 말 것
+
+[원본 HTML]
+{html_content}"""
+
+                # ── Claude API 호출 ───────────────────────────
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                try:
+                    status_text.text("📖 HTML 파일 읽는 중...")
+                    progress_bar.progress(10)
+
+                    client = get_anthropic_client()
+
+                    status_text.text("🤖 Claude가 분석 및 수정 중... (30초~1분 소요)")
+                    progress_bar.progress(30)
+
+                    response = client.messages.create(
+                        model="claude-opus-4-5",
+                        max_tokens=16000,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+
+                    improved_html = response.content[0].text.strip()
+
+                    # 마크다운 코드블록 제거
+                    if improved_html.startswith("```"):
+                        lines = improved_html.split("\n")
+                        improved_html = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+
+                    status_text.text("✏️ 수정 완료! Netlify 배포 중...")
+                    progress_bar.progress(70)
+
+                    # ── Netlify 자동 배포 ─────────────────────
+                    if netlify_ready:
+                        success, result = deploy_to_netlify(improved_html, NETLIFY_SITE_ID, NETLIFY_TOKEN)
+                        progress_bar.progress(100)
+
+                        if success:
+                            status_text.text("🎉 배포 완료!")
+                            st.success("🎉 수정 완료 + Netlify 자동 배포 성공!")
+                            st.balloons()
+                            st.markdown(f"""
+                            ### 🌐 배포 결과
+                            - ✅ Claude 수정 완료
+                            - ✅ Netlify 배포 완료
+                            - 🔗 [aligomedia.co.kr 바로가기](https://aligomedia.co.kr)
+                            """)
+                        else:
+                            status_text.text("⚠️ 배포 실패 - 파일은 다운로드 가능")
+                            st.warning(f"⚠️ Netlify 배포 실패: {result}")
+                    else:
+                        progress_bar.progress(100)
+                        status_text.text("✅ 수정 완료!")
+
+                    # 세션에 저장
+                    st.session_state["improved_html"] = improved_html
+                    st.session_state["original_html"] = html_content
+                    st.session_state["improvement_done"] = True
+
+                except Exception as e:
+                    st.error(f"❌ 오류 발생: {e}")
+                    st.info("💡 ANTHROPIC_API_KEY가 올바르게 설정되어 있는지 확인해주세요.")
+
+    # ── 결과 표시 ─────────────────────────────────────
+    if st.session_state.get("improvement_done"):
+        improved_html = st.session_state["improved_html"]
+        original_html = st.session_state["original_html"]
+
+        st.markdown("---")
+
+        col_before, col_after = st.columns(2)
+        with col_before:
+            st.markdown("#### 📄 수정 전")
+            st.metric("파일 크기", f"{len(original_html):,}자")
+            with st.expander("원본 코드 보기"):
+                st.code(original_html[:1500] + "...", language="html")
+        with col_after:
+            st.markdown("#### ✅ 수정 후")
+            st.metric("파일 크기", f"{len(improved_html):,}자",
+                      delta=f"{len(improved_html)-len(original_html):+,}자")
+            with st.expander("수정된 코드 보기"):
+                st.code(improved_html[:1500] + "...", language="html")
+
+        st.markdown("---")
+        st.markdown("### 📥 수동 다운로드 (Netlify 배포 실패 시 사용)")
+
+        st.download_button(
+            label="⬇️ 수정된 index.html 다운로드",
+            data=improved_html.encode("utf-8"),
+            file_name="index.html",
+            mime="text/html",
+            use_container_width=True,
+            type="primary"
+        )
+
+        if st.button("🔄 다시 분석하기", use_container_width=True):
+            st.session_state["improvement_done"] = False
+            st.session_state["improved_html"] = ""
+            st.rerun()
