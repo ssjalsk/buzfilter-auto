@@ -77,72 +77,55 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     buf = io.BytesIO()
     w, h = A4
     c = canvas.Canvas(buf, pagesize=A4)
-
     LG = colors.HexColor("#F2F2F2")
     MG = colors.HexColor("#CCCCCC")
     DG = colors.HexColor("#404040")
     TBG = colors.HexColor("#D9D9D9")
     ML, MR = 20*mm, w-20*mm
     PW = MR - ML
-
     items = quote_data["items"]
     is_tax = quote_data["tax_type"] == "발행"
     sup = sum(int(it["수량"])*int(it["단가"]) for it in items)
     vat = int(sup*0.1) if is_tax else 0
     tot = sup + vat
-
     y = h - 18*mm
-    c.setFont(fb, 28)
-    c.setFillColor(colors.black)
+    c.setFont(fb, 28); c.setFillColor(colors.black)
     c.drawCentredString(w/2, y, "견   적   서")
     y -= 10*mm
-    c.setStrokeColor(colors.black)
-    c.setLineWidth(1.5)
-    c.line(ML, y, MR, y)
+    c.setStrokeColor(colors.black); c.setLineWidth(1.5); c.line(ML, y, MR, y)
     y -= 8*mm
-
     bt = y
     rcx, rcw = ML+PW*0.5, PW*0.5
     c.setFont(fb, 18); c.setFillColor(colors.HexColor("#1a5fa8"))
     c.drawString(ML+5*mm, bt-12*mm, "Aligo")
-    c.setFont(fb, 14)
-    c.drawString(ML+5*mm, bt-20*mm, "Media")
-
+    c.setFont(fb, 14); c.drawString(ML+5*mm, bt-20*mm, "Media")
     if stamp_path and os.path.exists(stamp_path):
-        try:
-            c.drawImage(stamp_path, rcx-24*mm, bt-33*mm, width=22*mm, height=22*mm, mask='auto')
+        try: c.drawImage(stamp_path, rcx-24*mm, bt-33*mm, width=22*mm, height=22*mm, mask='auto')
         except: pass
-
-    c.setFillColor(DG)
-    c.rect(rcx, bt-6*mm, rcw, 6*mm, fill=1, stroke=0)
+    c.setFillColor(DG); c.rect(rcx, bt-6*mm, rcw, 6*mm, fill=1, stroke=0)
     c.setFillColor(colors.white); c.setFont(fb, 10)
     c.drawCentredString(rcx+rcw/2, bt-4.5*mm, "공  급  자")
-
     srows = [("등록번호","161-22-02310","대표자","박철규"),("상  호","알리고미디어","",""),
              ("주  소","서울 마포구 양화로64, 8층","",""),("연락처","010-9469-2381","",""),
              ("업  태","전문, 서비스업","종 목","광고대행업")]
     rh = 5.5*mm
     for i,(k1,v1,k2,v2) in enumerate(srows):
         ry = bt-6*mm-(i+1)*rh
-        c.setFillColor(LG if i%2==0 else colors.white)
-        c.rect(rcx, ry, rcw, rh, fill=1, stroke=0)
-        c.setStrokeColor(MG); c.setLineWidth(0.5)
-        c.rect(rcx, ry, rcw, rh, fill=0, stroke=1)
+        c.setFillColor(LG if i%2==0 else colors.white); c.rect(rcx, ry, rcw, rh, fill=1, stroke=0)
+        c.setStrokeColor(MG); c.setLineWidth(0.5); c.rect(rcx, ry, rcw, rh, fill=0, stroke=1)
         c.setFillColor(colors.black)
         c.setFont(fb,8); c.drawString(rcx+2*mm, ry+1.5*mm, k1)
         c.setFont(fn,8); c.drawString(rcx+16*mm, ry+1.5*mm, v1)
         if k2:
             c.setFont(fb,8); c.drawString(rcx+rcw*0.62, ry+1.5*mm, k2)
             c.setFont(fn,8); c.drawString(rcx+rcw*0.62+10*mm, ry+1.5*mm, v2)
-
     y = bt-6*mm-len(srows)*rh-5*mm
     c.setStrokeColor(MG); c.setLineWidth(0.5)
     c.setFillColor(LG); c.rect(ML, y-6*mm, 28*mm, 6*mm, fill=1, stroke=1)
     c.setFillColor(colors.black); c.setFont(fb,9)
     c.drawCentredString(ML+14*mm, y-4.5*mm, "견  적  일")
     c.setFillColor(colors.white); c.rect(ML+28*mm, y-6*mm, PW/2-28*mm, 6*mm, fill=1, stroke=1)
-    c.setFillColor(colors.black); c.setFont(fn,9)
-    c.drawString(ML+30*mm, y-4.5*mm, quote_data["date"])
+    c.setFillColor(colors.black); c.setFont(fn,9); c.drawString(ML+30*mm, y-4.5*mm, quote_data["date"])
     ax = ML+PW/2
     c.setFillColor(colors.white); c.rect(ax, y-6*mm, PW/2, 6*mm, fill=1, stroke=1)
     c.setFillColor(colors.black); c.setFont(fb,8)
@@ -156,12 +139,10 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     c.setFont(fn,7.5); c.setFillColor(colors.black)
     c.drawCentredString(ax2+PW/4, y-4.5*mm, "208-174145-04-018 박철규 (알리고 미디어)")
     y -= 8*mm
-
     c.setFillColor(TBG); c.rect(ML, y-12*mm, PW*0.38, 12*mm, fill=1, stroke=1)
     c.setFillColor(colors.black); c.setFont(fb,11)
     c.drawCentredString(ML+PW*0.19, y-6*mm, "합계금액")
-    c.setFont(fn,8)
-    c.drawCentredString(ML+PW*0.19, y-10*mm, "(부가세 포함)" if is_tax else "(VAT 미포함)")
+    c.setFont(fn,8); c.drawCentredString(ML+PW*0.19, y-10*mm, "(부가세 포함)" if is_tax else "(VAT 미포함)")
     c.setFillColor(LG); c.rect(ML+PW*0.38, y-12*mm, PW*0.47, 12*mm, fill=1, stroke=1)
     c.setFillColor(colors.black); c.setFont(fb,11)
     c.drawCentredString(ML+PW*0.615, y-7*mm, "진행 상품 상세 내역")
@@ -169,7 +150,6 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     c.setFillColor(colors.black); c.setFont(fb,9)
     c.drawCentredString(ML+PW*0.925, y-7*mm, f"₩{tot:,}")
     y -= 14*mm
-
     cx = [ML, ML+12*mm, ML+70*mm, ML+105*mm, ML+118*mm, ML+136*mm, ML+154*mm]
     cw = [12*mm,58*mm,35*mm,13*mm,18*mm,18*mm]; cw.append(MR-cx[-1])
     labels = ["NO","품목","구성","수량","단가","공급가액(VAT별도)","비고"]
@@ -179,13 +159,10 @@ def generate_quote_pdf(quote_data, stamp_path=None):
         c.drawCentredString(cx[i]+cw[i]/2, y-4.5*mm, lbl)
         if i>0: c.setLineWidth(0.5); c.line(cx[i],y,cx[i],y-6*mm)
     y -= 6*mm
-
     max_r = max(len(items),10); rh2=6*mm
     for i in range(max_r):
-        c.setFillColor(LG if i%2==0 else colors.white)
-        c.rect(ML, y-rh2, PW, rh2, fill=1, stroke=0)
-        c.setStrokeColor(MG); c.setLineWidth(0.3)
-        c.rect(ML, y-rh2, PW, rh2, fill=0, stroke=1)
+        c.setFillColor(LG if i%2==0 else colors.white); c.rect(ML, y-rh2, PW, rh2, fill=1, stroke=0)
+        c.setStrokeColor(MG); c.setLineWidth(0.3); c.rect(ML, y-rh2, PW, rh2, fill=0, stroke=1)
         c.setFillColor(colors.black); c.setFont(fn,8)
         c.drawCentredString(cx[0]+cw[0]/2, y-4.5*mm, str(i+1))
         if i < len(items):
@@ -200,7 +177,6 @@ def generate_quote_pdf(quote_data, stamp_path=None):
             c.drawRightString(cx[5]+cw[5]-1*mm, y-4.5*mm, "0")
         for j in range(1,len(cx)): c.setLineWidth(0.3); c.line(cx[j],y,cx[j],y-rh2)
         y -= rh2
-
     sums = [("공급가액 합계",sup),("세  액 (VAT)",vat),("합  계(부가세 포함)",tot)] if is_tax else [("공급가액 합계 (VAT 미발행)",sup)]
     for lbl,amt in sums:
         c.setFillColor(TBG); c.rect(ML, y-7*mm, PW, 7*mm, fill=1, stroke=1)
@@ -208,7 +184,6 @@ def generate_quote_pdf(quote_data, stamp_path=None):
         c.drawCentredString(ML+PW*0.5, y-4.8*mm, lbl)
         c.drawRightString(cx[5]+cw[5]-1*mm, y-4.8*mm, f"{amt:,}")
         y -= 7*mm
-
     y -= 5*mm
     c.setFont(fb,9); c.setFillColor(colors.black)
     c.drawString(ML, y, "▶ 입금 계좌번호 : IBK기업은행 208-174145-04-018 박철규 (알리고 미디어)")
@@ -220,16 +195,16 @@ def generate_quote_pdf(quote_data, stamp_path=None):
 # =====================================================
 # Netlify 자동 배포 함수
 # =====================================================
-def deploy_to_netlify(html_content, site_id, token):
-    """수정된 HTML을 Netlify에 자동 배포"""
+def deploy_to_netlify(html_content, site_id, token, extra_files=None):
     try:
-        # ZIP 파일로 패키징
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
             zf.writestr('index.html', html_content.encode('utf-8'))
+            if extra_files:
+                for filename, file_bytes in extra_files.items():
+                    zf.writestr(filename, file_bytes)
         zip_buffer.seek(0)
 
-        # Netlify API 호출
         headers = {
             'Authorization': f'Bearer {token}',
             'Content-Type': 'application/zip'
@@ -242,10 +217,9 @@ def deploy_to_netlify(html_content, site_id, token):
         )
 
         if response.status_code in [200, 201]:
-            data = response.json()
-            return True, data.get('deploy_url') or data.get('url') or 'https://aligomedia.co.kr'
+            return True, "성공"
         else:
-            return False, f"오류 코드: {response.status_code} / {response.text[:200]}"
+            return False, f"오류 코드: {response.status_code}\n{response.text[:300]}"
 
     except Exception as e:
         return False, str(e)
@@ -406,24 +380,19 @@ elif menu == "📝 리뷰 입력":
 elif menu == "📄 견적서 생성":
     st.title("📄 견적서 자동 생성")
     st.subheader("정보를 입력하면 PDF 견적서를 자동으로 만들어드립니다.")
-
     col1, col2, col3 = st.columns(3)
     with col1: client_name = st.text_input("고객사명", placeholder="예) 지케이라이프")
     with col2: quote_date = st.text_input("견적일", value=datetime.now().strftime("%Y. %m. %d"))
     with col3: tax_type = st.radio("계산서 발행 여부", ["발행", "미발행"], horizontal=True)
     memo = st.text_input("비고 (선택)", placeholder="예) 패키지 할인 포함")
-
     st.markdown("---")
     st.markdown("### 📋 항목 입력")
     st.caption("➕ 항목 추가 버튼으로 행을 늘리고, 🗑️ 버튼으로 삭제하세요.")
-
     if 'quote_items' not in st.session_state:
         st.session_state.quote_items = [{"품목":"","구성":"","수량":1,"단가":0,"비고":""}]
-
     hcols = st.columns([3,2,1,2,2,1])
     for col,lbl in zip(hcols,["**품목**","**구성**","**수량**","**단가(원)**","**공급가액**","**삭제**"]):
         col.markdown(lbl)
-
     to_del = []
     for i,item in enumerate(st.session_state.quote_items):
         cols = st.columns([3,2,1,2,2,1])
@@ -434,20 +403,16 @@ elif menu == "📄 견적서 생성":
         sp = item["수량"] * item["단가"]
         cols[4].markdown(f"<div style='padding:8px 0;font-weight:bold;'>₩{sp:,}</div>", unsafe_allow_html=True)
         if cols[5].button("🗑️", key=f"d{i}"): to_del.append(i)
-
     for i in sorted(to_del, reverse=True): st.session_state.quote_items.pop(i)
     if to_del: st.rerun()
-
     if st.button("➕ 항목 추가"):
         st.session_state.quote_items.append({"품목":"","구성":"","수량":1,"단가":0,"비고":""})
         st.rerun()
-
     st.markdown("---")
     valid = [it for it in st.session_state.quote_items if it["품목"].strip()]
     sup = sum(it["수량"]*it["단가"] for it in valid)
     vat = int(sup*0.1) if tax_type=="발행" else 0
     tot = sup + vat
-
     mc1,mc2,mc3 = st.columns(3)
     mc1.metric("공급가액 합계", f"₩{sup:,}")
     if tax_type == "발행":
@@ -456,7 +421,6 @@ elif menu == "📄 견적서 생성":
     else:
         mc2.metric("계산서", "미발행")
         mc3.metric("최종 합계 (VAT 없음)", f"₩{tot:,}")
-
     st.markdown("---")
     if st.button("📄 견적서 PDF 생성", type="primary", use_container_width=True):
         if not client_name.strip():
@@ -482,70 +446,67 @@ elif menu == "📄 견적서 생성":
 # 페이지 4: 홈페이지 자동 개선
 # =====================================================
 elif menu == "🌐 홈페이지 자동 개선":
-    st.title("🌐 홈페이지 자동 개선")
-    st.subheader("index.html을 업로드하면 Claude가 분석·수정하고 Netlify에 자동 배포합니다.")
+    st.title("🌐 홈페이지 자동 개선 + 자동 배포")
+    st.subheader("HTML과 이미지를 업로드하면 Claude가 수정하고 Netlify에 자동 배포합니다.")
 
-    # Netlify 설정 확인
+    # Netlify 연결 상태 확인
     try:
         NETLIFY_TOKEN = st.secrets["NETLIFY_TOKEN"]
         NETLIFY_SITE_ID = st.secrets["NETLIFY_SITE_ID"]
         netlify_ready = True
+        st.success("✅ Netlify 연결 준비 완료 — 버튼 한 번으로 자동 배포됩니다.")
     except:
         netlify_ready = False
-
-    if not netlify_ready:
-        st.warning("⚠️ Netlify 자동 배포를 사용하려면 secrets.toml에 NETLIFY_TOKEN과 NETLIFY_SITE_ID를 추가하세요.")
-        st.code("""
-# .streamlit/secrets.toml 에 추가
-NETLIFY_TOKEN = "nfp_xgREqCKFtHYA5iNKPR3t1VDDDW1cihZD99a6"
-NETLIFY_SITE_ID = "57340c83-2554-459c-9a49-b29fbdb9b0c0"
-        """, language="toml")
+        st.error("❌ Netlify 미연결 — secrets.toml에 아래 두 줄을 추가해주세요.")
+        st.code("""NETLIFY_TOKEN = "발급받은_토큰"\nNETLIFY_SITE_ID = "57340c83-2554-459c-9a49-b29fbdb9b0c0" """, language="toml")
 
     st.markdown("---")
 
-    # ── 체크 항목 선택 ──────────────────────────────
-    st.markdown("### ✅ 개선 항목 선택")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        check_mobile = st.checkbox("📱 모바일 최적화", value=True)
-    with col2:
-        check_responsive = st.checkbox("📐 반응형 디자인", value=True)
-    with col3:
-        check_seo = st.checkbox("🔍 구글 SEO", value=True)
+    # ── STEP 1: HTML 업로드 ───────────────────────────
+    st.markdown("### 📂 STEP 1 — index.html 업로드")
+    uploaded_html = st.file_uploader("index.html 업로드", type=["html","htm"], key="html_upload")
 
-    check_extra = st.text_area(
-        "📝 추가 요청사항 (선택)",
-        placeholder="예) 버튼 색상을 더 눈에 띄게 바꿔줘 / CTA 문구를 더 강하게 수정해줘",
-        height=80
+    # ── STEP 2: 이미지 업로드 ─────────────────────────
+    st.markdown("### 🖼️ STEP 2 — 이미지 파일 업로드")
+    st.caption("image_4.png, pr_chat.png, review_chat.png 등 홈페이지에 쓰이는 이미지를 모두 올려주세요.")
+    uploaded_images = st.file_uploader(
+        "이미지 파일 (여러 개 동시 선택 가능)",
+        type=["png","jpg","jpeg","gif","webp","ico"],
+        accept_multiple_files=True,
+        key="image_upload"
     )
+    if uploaded_images:
+        st.success(f"✅ 이미지 {len(uploaded_images)}개: {', '.join([f.name for f in uploaded_images])}")
 
     st.markdown("---")
 
-    # ── 파일 업로드 ──────────────────────────────────
-    st.markdown("### 📂 HTML 파일 업로드")
-    uploaded_html = st.file_uploader("index.html 파일을 업로드하세요", type=["html", "htm"])
+    # ── STEP 3: 개선 항목 선택 ────────────────────────
+    st.markdown("### ✅ STEP 3 — 개선 항목 선택")
+    col1, col2, col3 = st.columns(3)
+    with col1: check_mobile = st.checkbox("📱 모바일 최적화", value=True)
+    with col2: check_responsive = st.checkbox("📐 반응형 디자인", value=True)
+    with col3: check_seo = st.checkbox("🔍 구글 SEO", value=True)
+    check_extra = st.text_area("📝 추가 요청사항 (선택)", placeholder="예) 버튼 색상을 더 눈에 띄게 / CTA 문구 강하게", height=80)
 
+    st.markdown("---")
+
+    # ── 실행 버튼 ─────────────────────────────────────
     if uploaded_html:
         html_content = uploaded_html.read().decode("utf-8", errors="ignore")
-
-        with st.expander("📄 업로드된 HTML 미리보기 (원본)", expanded=False):
-            st.code(html_content[:2000] + ("\n\n... (이하 생략)" if len(html_content) > 2000 else ""), language="html")
-
-        st.info(f"📊 파일 크기: {len(html_content):,}자 | 파일명: {uploaded_html.name}")
 
         if not any([check_mobile, check_responsive, check_seo, check_extra.strip()]):
             st.warning("⚠️ 개선 항목을 최소 1개 이상 선택해주세요.")
         else:
-            if st.button("🚀 Claude가 분석하고 Netlify에 자동 배포", type="primary", use_container_width=True):
+            if st.button("🚀 Claude 수정 + Netlify 자동 배포", type="primary", use_container_width=True):
 
-                # ── 프롬프트 구성 ────────────────────────────
+                # 프롬프트 구성
                 check_list = []
                 if check_mobile:
                     check_list.append("""1. 모바일 최적화
-   - 터치 타겟 최소 44px 확보 (버튼, 링크)
+   - 터치 타겟 최소 44px (버튼, 링크)
    - iOS 폰트 자동 확대 방지 (-webkit-text-size-adjust)
    - 햄버거 메뉴 (768px 이하)
-   - 모바일에서 CTA 버튼 풀 너비""")
+   - 모바일 CTA 버튼 풀 너비""")
                 if check_responsive:
                     check_list.append("""2. 반응형 디자인
    - 브레이크포인트 3단계: 900px / 768px / 480px
@@ -554,99 +515,100 @@ NETLIFY_SITE_ID = "57340c83-2554-459c-9a49-b29fbdb9b0c0"
    - 프로세스 카드 5열 → 3열 → 2열""")
                 if check_seo:
                     check_list.append("""3. 구글 SEO
-   - og:image 절대경로로 수정 (https://aligomedia.co.kr/image_4.png)
-   - LocalBusiness + Service 구조화 데이터 추가
-   - <main> 태그로 주요 콘텐츠 감싸기
-   - <address> 태그로 사업자 정보 시맨틱 처리
-   - 이미지 alt 텍스트 구체화
-   - loading="lazy" 이미지에 추가
-   - window.stop() 제거 (Core Web Vitals 저해)
-   - 외부 링크에 rel="noopener noreferrer" 추가
-   - Twitter Card 메타태그 추가""")
+   - og:image 절대경로 (https://aligomedia.co.kr/image_4.png)
+   - LocalBusiness + Service 구조화 데이터
+   - <main> 태그, <address> 태그
+   - 이미지 alt 구체화, loading=lazy
+   - window.stop() 제거
+   - rel="noopener noreferrer"
+   - Twitter Card 추가""")
                 if check_extra.strip():
-                    check_list.append(f"4. 추가 요청사항\n   {check_extra.strip()}")
+                    check_list.append(f"4. 추가 요청\n   {check_extra.strip()}")
 
-                prompt = f"""너는 웹 개발 전문가야. 아래 HTML 코드를 분석하고 직접 수정해서 완성된 HTML 코드만 반환해줘.
+                prompt = f"""너는 웹 개발 전문가야. 아래 HTML을 분석하고 수정해서 완성된 HTML 코드만 반환해줘.
 
 [개선 항목]
 {chr(10).join(check_list)}
 
 [주의사항]
-- 반드시 수정된 HTML 전체 코드만 반환해 (설명, 마크다운 코드블록 없이 <!DOCTYPE html>부터 시작)
-- 기존 디자인, 색상, 브랜드 정체성은 유지
-- 기존 기능(카운터 애니메이션, 관리자 시크릿 클릭)은 그대로 유지
-- 한국어 텍스트는 수정하지 말 것
+- 수정된 HTML 전체 코드만 반환 (설명 없이 <!DOCTYPE html>부터 시작)
+- 기존 디자인·색상·브랜드 정체성 유지
+- 기존 기능(카운터 애니메이션, 관리자 시크릿 클릭) 유지
+- 한국어 텍스트 수정 금지
 
 [원본 HTML]
 {html_content}"""
 
-                # ── Claude API 호출 ───────────────────────────
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
                 try:
-                    status_text.text("📖 HTML 파일 읽는 중...")
-                    progress_bar.progress(10)
-
-                    client = get_anthropic_client()
-
+                    # 1. Claude 수정
                     status_text.text("🤖 Claude가 분석 및 수정 중... (30초~1분 소요)")
-                    progress_bar.progress(30)
+                    progress_bar.progress(20)
 
-                    response = client.messages.create(
+                    ai_client = get_anthropic_client()
+                    response = ai_client.messages.create(
                         model="claude-opus-4-5",
                         max_tokens=16000,
                         messages=[{"role": "user", "content": prompt}]
                     )
 
                     improved_html = response.content[0].text.strip()
-
-                    # 마크다운 코드블록 제거
                     if improved_html.startswith("```"):
                         lines = improved_html.split("\n")
                         improved_html = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
 
-                    status_text.text("✏️ 수정 완료! Netlify 배포 중...")
-                    progress_bar.progress(70)
+                    progress_bar.progress(60)
+                    status_text.text("✅ Claude 수정 완료! Netlify 배포 중...")
 
-                    # ── Netlify 자동 배포 ─────────────────────
+                    # 2. 이미지 파일 준비
+                    extra_files = {}
+                    if uploaded_images:
+                        for img_file in uploaded_images:
+                            img_file.seek(0)
+                            extra_files[img_file.name] = img_file.read()
+
+                    # 3. Netlify 배포
                     if netlify_ready:
-                        success, result = deploy_to_netlify(improved_html, NETLIFY_SITE_ID, NETLIFY_TOKEN)
+                        success, result = deploy_to_netlify(
+                            improved_html, NETLIFY_SITE_ID, NETLIFY_TOKEN, extra_files
+                        )
                         progress_bar.progress(100)
 
                         if success:
-                            status_text.text("🎉 배포 완료!")
+                            status_text.text("🎉 완료!")
                             st.success("🎉 수정 완료 + Netlify 자동 배포 성공!")
                             st.balloons()
-                            st.markdown(f"""
-                            ### 🌐 배포 결과
-                            - ✅ Claude 수정 완료
-                            - ✅ Netlify 배포 완료
-                            - 🔗 [aligomedia.co.kr 바로가기](https://aligomedia.co.kr)
-                            """)
+                            st.markdown("### 🌐 배포 완료!")
+                            st.markdown("- ✅ Claude 수정 완료\n- ✅ Netlify 배포 완료\n- ⏱️ 반영까지 약 10~30초 소요")
+                            st.link_button("🔗 aligomedia.co.kr 확인하기", "https://aligomedia.co.kr")
                         else:
-                            status_text.text("⚠️ 배포 실패 - 파일은 다운로드 가능")
-                            st.warning(f"⚠️ Netlify 배포 실패: {result}")
+                            progress_bar.progress(100)
+                            status_text.text("⚠️ 배포 실패")
+                            st.error(f"❌ Netlify 배포 실패\n\n{result}")
+                            st.warning("아래 버튼으로 수동 다운로드 후 Netlify에 직접 올려주세요.")
                     else:
                         progress_bar.progress(100)
-                        status_text.text("✅ 수정 완료!")
+                        status_text.text("✅ 수정 완료 (Netlify 미연결 — 아래에서 다운로드)")
 
-                    # 세션에 저장
+                    # 세션 저장
                     st.session_state["improved_html"] = improved_html
                     st.session_state["original_html"] = html_content
                     st.session_state["improvement_done"] = True
 
                 except Exception as e:
                     st.error(f"❌ 오류 발생: {e}")
-                    st.info("💡 ANTHROPIC_API_KEY가 올바르게 설정되어 있는지 확인해주세요.")
 
-    # ── 결과 표시 ─────────────────────────────────────
+    else:
+        st.info("👆 STEP 1에서 index.html을 업로드하면 시작할 수 있어요!")
+
+    # ── 결과 표시 + 다운로드 ──────────────────────────
     if st.session_state.get("improvement_done"):
         improved_html = st.session_state["improved_html"]
         original_html = st.session_state["original_html"]
 
         st.markdown("---")
-
         col_before, col_after = st.columns(2)
         with col_before:
             st.markdown("#### 📄 수정 전")
@@ -661,18 +623,16 @@ NETLIFY_SITE_ID = "57340c83-2554-459c-9a49-b29fbdb9b0c0"
                 st.code(improved_html[:1500] + "...", language="html")
 
         st.markdown("---")
-        st.markdown("### 📥 수동 다운로드 (Netlify 배포 실패 시 사용)")
-
+        st.markdown("### 📥 수동 다운로드 (배포 실패 시 사용)")
         st.download_button(
             label="⬇️ 수정된 index.html 다운로드",
             data=improved_html.encode("utf-8"),
             file_name="index.html",
             mime="text/html",
-            use_container_width=True,
-            type="primary"
+            use_container_width=True
         )
 
-        if st.button("🔄 다시 분석하기", use_container_width=True):
+        if st.button("🔄 처음부터 다시", use_container_width=True):
             st.session_state["improvement_done"] = False
             st.session_state["improved_html"] = ""
             st.rerun()
