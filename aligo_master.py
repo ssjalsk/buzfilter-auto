@@ -55,6 +55,16 @@ def insert_row_safe(sheet, start_row, rows_data):
         sheet.update(f"I{r}", [[row[6]]], value_input_option='USER_ENTERED')
         sheet.update(f"K{r}", [[row[7]]], value_input_option='USER_ENTERED')
 
+# =====================================================
+# [수정] E열 텍스트에서 수량 추출 함수 추가
+# 패턴: "상품명 / n세트" 또는 "상품명 / n개"
+# =====================================================
+def extract_qty_from_text(text):
+    match = re.search(r'/\s*(\d+)\s*(세트|개)', str(text))
+    if match:
+        return int(match.group(1))
+    return 1  # 패턴 없으면 기본값 1
+
 def generate_quote_pdf(quote_data, stamp_path=None):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors
@@ -265,10 +275,20 @@ if menu == "🏭 버즈필터 발주":
                 today = datetime.now()
                 rows_to_add, match_results = [], []
                 for idx, row in df.iterrows():
-                    raw = str(row.get('상품명+옵션+개수',''))
-                    qty = int(row.get('수량',1))
-                    price = int(row.get('가격',0))
-                    ch = str(row.get('판매처','쿠팡'))
+                    # =====================================================
+                    # [수정] 컬럼명 변경: '상품명+옵션+개수' → '상품명+옵션'
+                    # (괄호 앞 텍스트로 split했으므로 실제 키는 '상품명+옵션+개수'로 유지됨)
+                    # E열 전체 텍스트에서 상품명 추출 및 수량 파싱
+                    # =====================================================
+                    raw = str(row.get('상품명+옵션+개수', ''))
+
+                    # [수정] 기존: qty = int(row.get('수량', 1))
+                    # [수정] 변경: E열 텍스트에서 '/ n세트' 또는 '/ n개' 패턴으로 수량 추출
+                    qty = extract_qty_from_text(raw)
+
+                    price = int(row.get('가격', 0))
+                    ch = str(row.get('판매처', '쿠팡'))
+
                     prompt = f"""너는 상품 매칭 전문가야.\n발주서 상품명: {raw}\n상품 리스트:\n{calc_df[['브랜드','제품명','상품코드 표']].to_string(index=False)}\n반드시 아래 형식으로만 답해줘:\n상품코드: [코드값]\n브랜드: [브랜드값]\n못 찾겠으면:\n상품코드: 미등록\n브랜드: 미등록"""
                     resp = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=100, messages=[{"role":"user","content":prompt}])
                     rt = resp.content[0].text.strip()
@@ -276,17 +296,47 @@ if menu == "🏭 버즈필터 발주":
                     for line in rt.split('\n'):
                         if '상품코드:' in line: mc = line.split('상품코드:')[1].strip()
                         if '브랜드:' in line: mb = line.split('브랜드:')[1].strip()
-                    match_results.append({'상품명':raw,'매칭 브랜드':mb,'매칭 코드':mc,'판매처':ch,'가격':price,'수량':qty})
-                    rows_to_add.append([f"{today.year}년",f"{today.month}월",f"{today.day}일",mb,mc,ch,price,qty])
+
+                    match_results.append({
+                        '상품명': raw,
+                        '매칭 브랜드': mb,
+                        '매칭 코드': mc,
+                        '판매처': ch,
+                        '가격': price,
+                        # [수정] 수량 출처 표시: E열 파싱 결과
+                        '수량(파싱)': qty
+                    })
+                    rows_to_add.append([
+                        f"{today.year}년",
+                        f"{today.month}월",
+                        f"{today.day}일",
+                        mb,
+                        mc,
+                        ch,
+                        price,
+                        qty   # K열에 입력될 수량 (E열에서 파싱)
+                    ])
                 st.session_state['rows_to_add'] = rows_to_add
                 st.session_state['match_results'] = match_results
                 st.session_state['ready_to_insert'] = True
             st.success("✅ AI 매칭 완료!")
+
         if st.session_state.get('ready_to_insert'):
             rdf = pd.DataFrame(st.session_state['match_results'])
-            st.write("🔍 AI 매칭 결과:"); st.dataframe(rdf)
-            unm = rdf[rdf['매칭 코드']=='미등록']
-            if len(unm) > 0: st.warning(f"⚠️ {len(unm)}건 매칭 실패")
+            st.write("🔍 AI 매칭 결과 (수량은 E열 텍스트에서 자동 파싱)")
+            st.dataframe(rdf)
+
+            # 수량 파싱 실패 경고 (기본값 1로 처리된 항목)
+            # [수정] '수량(파싱)' 컬럼 기준으로 1인 항목 중 슬래시 없는 것 감지
+            no_slash = rdf[~rdf['상품명'].str.contains('/', na=False)]
+            if len(no_slash) > 0:
+                st.warning(f"⚠️ 아래 {len(no_slash)}건은 '/' 패턴이 없어 수량을 1로 처리했습니다. 확인해주세요:")
+                st.dataframe(no_slash[['상품명', '수량(파싱)']])
+
+            unm = rdf[rdf['매칭 코드'] == '미등록']
+            if len(unm) > 0:
+                st.warning(f"⚠️ {len(unm)}건 상품 매칭 실패")
+
             if st.button("✅ 확인했습니다. 장부에 최종 입력합니다."):
                 with st.spinner("장부 입력 중..."):
                     try:
@@ -449,7 +499,6 @@ elif menu == "🌐 홈페이지 자동 개선":
     st.title("🌐 홈페이지 자동 개선 + 자동 배포")
     st.subheader("HTML과 이미지를 업로드하면 Claude가 수정하고 Netlify에 자동 배포합니다.")
 
-    # Netlify 연결 상태 확인
     try:
         NETLIFY_TOKEN = st.secrets["NETLIFY_TOKEN"]
         NETLIFY_SITE_ID = st.secrets["NETLIFY_SITE_ID"]
@@ -462,11 +511,9 @@ elif menu == "🌐 홈페이지 자동 개선":
 
     st.markdown("---")
 
-    # ── STEP 1: HTML 업로드 ───────────────────────────
     st.markdown("### 📂 STEP 1 — index.html 업로드")
     uploaded_html = st.file_uploader("index.html 업로드", type=["html","htm"], key="html_upload")
 
-    # ── STEP 2: 이미지 업로드 ─────────────────────────
     st.markdown("### 🖼️ STEP 2 — 이미지 파일 업로드")
     st.caption("image_4.png, pr_chat.png, review_chat.png 등 홈페이지에 쓰이는 이미지를 모두 올려주세요.")
     uploaded_images = st.file_uploader(
@@ -480,7 +527,6 @@ elif menu == "🌐 홈페이지 자동 개선":
 
     st.markdown("---")
 
-    # ── STEP 3: 개선 항목 선택 ────────────────────────
     st.markdown("### ✅ STEP 3 — 개선 항목 선택")
     col1, col2, col3 = st.columns(3)
     with col1: check_mobile = st.checkbox("📱 모바일 최적화", value=True)
@@ -490,7 +536,6 @@ elif menu == "🌐 홈페이지 자동 개선":
 
     st.markdown("---")
 
-    # ── 실행 버튼 ─────────────────────────────────────
     if uploaded_html:
         html_content = uploaded_html.read().decode("utf-8", errors="ignore")
 
@@ -499,7 +544,6 @@ elif menu == "🌐 홈페이지 자동 개선":
         else:
             if st.button("🚀 Claude 수정 + Netlify 자동 배포", type="primary", use_container_width=True):
 
-                # 프롬프트 구성
                 check_list = []
                 if check_mobile:
                     check_list.append("""1. 모바일 최적화
@@ -543,7 +587,6 @@ elif menu == "🌐 홈페이지 자동 개선":
                 status_text = st.empty()
 
                 try:
-                    # 1. Claude 수정
                     status_text.text("🤖 Claude가 분석 및 수정 중... (30초~1분 소요)")
                     progress_bar.progress(20)
 
@@ -562,14 +605,12 @@ elif menu == "🌐 홈페이지 자동 개선":
                     progress_bar.progress(60)
                     status_text.text("✅ Claude 수정 완료! Netlify 배포 중...")
 
-                    # 2. 이미지 파일 준비
                     extra_files = {}
                     if uploaded_images:
                         for img_file in uploaded_images:
                             img_file.seek(0)
                             extra_files[img_file.name] = img_file.read()
 
-                    # 3. Netlify 배포
                     if netlify_ready:
                         success, result = deploy_to_netlify(
                             improved_html, NETLIFY_SITE_ID, NETLIFY_TOKEN, extra_files
@@ -592,7 +633,6 @@ elif menu == "🌐 홈페이지 자동 개선":
                         progress_bar.progress(100)
                         status_text.text("✅ 수정 완료 (Netlify 미연결 — 아래에서 다운로드)")
 
-                    # 세션 저장
                     st.session_state["improved_html"] = improved_html
                     st.session_state["original_html"] = html_content
                     st.session_state["improvement_done"] = True
@@ -603,7 +643,6 @@ elif menu == "🌐 홈페이지 자동 개선":
     else:
         st.info("👆 STEP 1에서 index.html을 업로드하면 시작할 수 있어요!")
 
-    # ── 결과 표시 + 다운로드 ──────────────────────────
     if st.session_state.get("improvement_done"):
         improved_html = st.session_state["improved_html"]
         original_html = st.session_state["original_html"]
