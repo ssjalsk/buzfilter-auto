@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
 import gspread
@@ -407,27 +408,6 @@ def generate_reviews_with_claude(client, product_info, selling_points, review_co
             progress_callback(batch_idx + 1, len(batches), len(all_reviews))
 
     return all_reviews  # [(num, content), ...] 리스트 직접 반환
-
-    prompt = f"""너는 실제 구매자처럼 자연스러운 한국어 리뷰를 쓰는 전문 작가야.
-
-[제품 정보]
-{product_info}
-
-[소구점 / 강조할 내용]
-{selling_points if selling_points else "없음 (제품 정보 기반으로 자유롭게 작성)"}
-
-[작성 조건]
-- 총 리뷰 수: {review_count}개
-- 리뷰당 글자 수: 약 {char_count}자 내외
-- 각 리뷰는 아래 페르소나에 맞게 말투와 내용을 다르게 작성할 것
-
-[페르소나 배정]
-{persona_text}
-
-[필수 규칙]
-1. 각 리뷰는 번호(숫자만)로 시작하고, 그 아래 리뷰 내용을 작성
-   형식 예시:
-    # (이 블록은 배치 함수로 대체됨 - 위 generate_reviews_with_claude 참고)
 
 # =====================================================
 # 리뷰 텍스트 파싱 (AI 생성 결과용 - 숫자. 형식)
