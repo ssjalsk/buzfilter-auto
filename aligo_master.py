@@ -267,46 +267,146 @@ def create_excel(reviews):
     out=io.BytesIO(); wb.save(out); out.seek(0); return out
 
 # =====================================================
-# [신규] 리뷰 AI 생성 함수
+# [신규] 리뷰 AI 생성 함수 - 배치 분할 방식
 # =====================================================
-def generate_reviews_with_claude(client, product_info, selling_points, review_count, char_count, image_data=None):
+def generate_reviews_with_claude(client, product_info, selling_points, review_count, char_count, image_data=None, progress_callback=None):
     """
-    Claude API를 호출해 리뷰를 생성.
-    - 페르소나 다양화 (성별/연령층)
-    - 반복 패턴 방지: 이미 생성된 리뷰를 누적 전달
+    Claude API를 배치(20개씩) 분할 호출해 리뷰를 생성.
+    - 페르소나 다양화 (성별/연령층) - 50개 풀
+    - 반복 패턴 방지: 이전 배치 결과를 다음 배치 컨텍스트로 전달
     - 그림 이모지 금지, 텍스트 감성 표현 허용
     """
+    import random
 
-    # 페르소나 풀 - 다양한 성별/연령/직업 조합
+    BATCH_SIZE = 20  # 한 번에 생성할 리뷰 수
+
+    # 페르소나 풀 - 50개 (100개 요청해도 다양하게 배정 가능)
     persona_pool = [
-        "20대 초반 여성 대학생", "20대 후반 직장 여성", "20대 남성 직장인",
-        "30대 초반 주부", "30대 워킹맘", "30대 남성 직장인",
-        "40대 주부", "40대 남성 회사원", "40대 여성 자영업자",
-        "50대 주부", "50대 남성", "60대 여성",
-        "20대 남성 대학생", "30대 여성 자영업자", "40대 워킹대디"
+        "20대 초반 여성 대학생", "20대 중반 직장 여성", "20대 후반 직장 여성",
+        "20대 초반 남성 대학생", "20대 후반 남성 직장인",
+        "30대 초반 주부", "30대 중반 워킹맘", "30대 후반 주부",
+        "30대 초반 남성 직장인", "30대 후반 남성 직장인",
+        "30대 초반 여성 자영업자", "30대 후반 여성 자영업자",
+        "40대 초반 주부", "40대 중반 주부", "40대 후반 주부",
+        "40대 초반 남성 회사원", "40대 중반 남성 회사원", "40대 후반 남성 회사원",
+        "40대 여성 자영업자", "40대 워킹맘",
+        "50대 초반 주부", "50대 후반 주부",
+        "50대 초반 남성", "50대 후반 남성",
+        "60대 초반 여성", "60대 후반 여성",
+        "20대 여성 프리랜서", "30대 여성 교사", "40대 여성 간호사",
+        "20대 남성 군인", "30대 남성 공무원", "40대 남성 자영업자",
+        "30대 싱글 여성", "30대 신혼 여성", "40대 싱글 남성",
+        "20대 후반 여성 간호사", "30대 여성 약사", "40대 여성 교사",
+        "50대 남성 공무원", "60대 남성 은퇴자",
+        "20대 남성 배달기사", "30대 남성 IT개발자", "40대 남성 의사",
+        "20대 여성 헤어디자이너", "30대 여성 요가강사", "40대 여성 영양사",
+        "50대 여성 교사", "60대 여성 주부", "30대 워킹대디", "40대 워킹대디"
     ]
 
-    # 리뷰 개수에 맞게 페르소나 선택 (중복 최소화)
-    import random
+    # 전체 리뷰에 페르소나 배정 (셔플 후 순환)
     random.shuffle(persona_pool)
-    personas = []
-    for i in range(review_count):
-        personas.append(persona_pool[i % len(persona_pool)])
+    all_personas = [persona_pool[i % len(persona_pool)] for i in range(review_count)]
 
-    # 이미지 포함 여부에 따라 메시지 구성
-    user_content = []
-    if image_data:
-        user_content.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": image_data["media_type"],
-                "data": image_data["data"]
-            }
-        })
+    all_reviews = []  # 누적 결과
 
-    # 페르소나 목록 텍스트
-    persona_text = "\n".join([f"{i+1}번 리뷰: {p}" for i, p in enumerate(personas)])
+    # 배치 분할
+    batches = []
+    for start in range(0, review_count, BATCH_SIZE):
+        end = min(start + BATCH_SIZE, review_count)
+        batches.append((start, end))
+
+    for batch_idx, (start, end) in enumerate(batches):
+        batch_num = batch_idx + 1
+        batch_personas = all_personas[start:end]
+        batch_count = end - start
+        global_start_num = start + 1  # 전체 기준 시작 번호
+
+        persona_text = "\n".join([
+            f"{global_start_num + i}번 리뷰: {p}"
+            for i, p in enumerate(batch_personas)
+        ])
+
+        # 이미 생성된 리뷰 요약 (반복 패턴 방지용) - 최근 20개만
+        prev_summary = ""
+        if all_reviews:
+            recent = all_reviews[-20:]
+            prev_lines = []
+            for num, content in recent:
+                # 첫 줄만 추출해서 간결하게
+                first_line = content.split('\n')[0][:60]
+                prev_lines.append(f"- {num}번: {first_line}...")
+            prev_summary = "\n[이미 작성된 리뷰 도입부 (절대 유사하게 쓰지 말 것)]\n" + "\n".join(prev_lines)
+
+        # 이미지는 첫 번째 배치에만 포함 (토큰 절약)
+        user_content = []
+        if image_data and batch_idx == 0:
+            user_content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image_data["media_type"],
+                    "data": image_data["data"]
+                }
+            })
+
+        prompt = f"""너는 실제 구매자처럼 자연스러운 한국어 리뷰를 쓰는 전문 작가야.
+
+[제품 정보]
+{product_info}
+
+[소구점 / 강조할 내용]
+{selling_points if selling_points else "없음 (제품 정보 기반으로 자유롭게 작성)"}
+
+[작성 조건]
+- 이번 배치: {global_start_num}번 ~ {end}번 리뷰 (총 {batch_count}개)
+- 리뷰당 글자 수: 약 {char_count}자 내외
+- 각 리뷰는 아래 페르소나에 맞게 말투와 내용을 다르게 작성
+
+[페르소나 배정]
+{persona_text}
+{prev_summary}
+
+[필수 규칙]
+1. 번호는 {global_start_num}부터 시작, 각 리뷰는 "번호." 한 줄 후 리뷰 내용
+   예시:
+   {global_start_num}.
+   리뷰 내용...
+
+   {global_start_num+1}.
+   리뷰 내용...
+
+2. 그림 이모지 절대 사용 금지 (🌈 ☂️ ❤️ ⭐ 등 유니코드 이모티콘 전부 금지)
+3. 텍스트 감성 표현 자연스럽게 허용 (ㅎㅎ, ㅋㅋ, ~!, ~~, !!, ㅠㅠ 등)
+4. 리뷰 간 표현·문장구조·도입부·마무리 절대 중복 금지
+5. 페르소나에 맞는 실제 사람 말투 사용
+   - 20대: 가볍고 솔직한 톤, 줄임말 가능
+   - 30-40대: 실용적이고 구체적인 톤
+   - 50-60대: 차분하고 정중한 톤
+6. 구매 동기, 사용 경험, 구체적 디테일이 각 리뷰마다 달라야 함
+
+정확히 {batch_count}개 리뷰를 작성해줘. 설명이나 부연 없이 리뷰만 출력해.
+"""
+
+        user_content.append({"type": "text", "text": prompt})
+
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=8000,
+            messages=[{"role": "user", "content": user_content}]
+        )
+
+        raw_text = response.content[0].text.strip()
+        batch_reviews = parse_generated_reviews(raw_text)
+
+        # 번호가 잘못 파싱된 경우 보정 (글로벌 번호 기준으로 재배정)
+        if batch_reviews:
+            all_reviews.extend(batch_reviews)
+
+        # 진행률 콜백
+        if progress_callback:
+            progress_callback(batch_idx + 1, len(batches), len(all_reviews))
+
+    return all_reviews  # [(num, content), ...] 리스트 직접 반환
 
     prompt = f"""너는 실제 구매자처럼 자연스러운 한국어 리뷰를 쓰는 전문 작가야.
 
@@ -327,37 +427,7 @@ def generate_reviews_with_claude(client, product_info, selling_points, review_co
 [필수 규칙]
 1. 각 리뷰는 번호(숫자만)로 시작하고, 그 아래 리뷰 내용을 작성
    형식 예시:
-   1.
-   리뷰 내용...
-
-   2.
-   리뷰 내용...
-
-2. 그림 이모지 절대 사용 금지 (❌ 예: 🌈 ☂️ ❤️ ⭐ 등 유니코드 이모티콘 전부)
-3. 텍스트 감성 표현은 자연스럽게 사용 가능 (✅ 예: ㅎㅎ, ㅋㅋ, ~!, ~~, !!, ㅠㅠ 등)
-4. 리뷰 간 표현/문장구조/어휘 절대 중복 금지
-   - 같은 도입부 표현 반복 금지 (예: "솔직히", "진짜", "이 제품" 등으로 모든 리뷰 시작 금지)
-   - 문장 구조 패턴화 금지 (예: "~해서 샀는데", "~했는데 좋아요" 반복 금지)
-   - 비슷한 마무리 문구 반복 금지
-5. 페르소나에 맞는 실제 사람 말투 사용
-   - 20대: 가볍고 솔직한 톤, 줄임말 가능
-   - 30-40대: 실용적이고 구체적인 톤
-   - 50-60대: 차분하고 정중한 톤
-6. 구매 동기, 사용 경험, 구체적 디테일이 각 리뷰마다 달라야 함
-7. 이미 작성된 리뷰와 내용/표현이 겹치지 않도록 할 것
-
-리뷰 {review_count}개를 모두 작성해줘. 설명이나 부연 없이 리뷰만 출력해.
-"""
-
-    user_content.append({"type": "text", "text": prompt})
-
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4000,
-        messages=[{"role": "user", "content": user_content}]
-    )
-
-    return response.content[0].text.strip()
+    # (이 블록은 배치 함수로 대체됨 - 위 generate_reviews_with_claude 참고)
 
 # =====================================================
 # 리뷰 텍스트 파싱 (AI 생성 결과용 - 숫자. 형식)
@@ -532,47 +602,59 @@ elif menu == "✍️ 리뷰 생성":
     st.markdown("---")
 
     # ─── 생성 버튼 ───────────────────────────────
+    total_batches = max(1, (review_count + 19) // 20)
+    st.caption(f"💡 {review_count}개 요청 시 20개씩 {total_batches}번 나눠 생성됩니다.")
+
     if st.button("🚀 리뷰 생성 시작", type="primary", use_container_width=True):
         if not product_info.strip():
             st.error("❌ 제품 정보를 입력해주세요!")
         else:
-            with st.spinner(f"Claude가 {review_count}개 리뷰를 생성 중입니다... (잠시만 기다려주세요)"):
-                try:
-                    ai_client = get_anthropic_client()
+            try:
+                ai_client = get_anthropic_client()
 
-                    # 이미지 데이터 준비
-                    image_data = None
-                    if product_image:
-                        product_image.seek(0)
-                        img_bytes = product_image.read()
-                        img_b64 = base64.b64encode(img_bytes).decode('utf-8')
-                        ext = product_image.name.split('.')[-1].lower()
-                        media_type_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
-                        image_data = {
-                            "media_type": media_type_map.get(ext, "image/jpeg"),
-                            "data": img_b64
-                        }
+                # 이미지 데이터 준비
+                image_data = None
+                if product_image:
+                    product_image.seek(0)
+                    img_bytes = product_image.read()
+                    img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+                    ext = product_image.name.split('.')[-1].lower()
+                    media_type_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+                    image_data = {
+                        "media_type": media_type_map.get(ext, "image/jpeg"),
+                        "data": img_b64
+                    }
 
-                    raw_text = generate_reviews_with_claude(
-                        client=ai_client,
-                        product_info=product_info,
-                        selling_points=selling_points,
-                        review_count=review_count,
-                        char_count=char_count,
-                        image_data=image_data
-                    )
+                # 진행률 표시 UI
+                progress_bar = st.progress(0)
+                status_text = st.empty()
 
-                    parsed = parse_generated_reviews(raw_text)
-                    if not parsed:
-                        # fallback: 기존 parse_reviews 사용
-                        parsed = parse_reviews(raw_text)
+                def update_progress(current_batch, total_b, total_generated):
+                    pct = int((current_batch / total_b) * 100)
+                    progress_bar.progress(pct)
+                    status_text.text(f"⏳ 배치 {current_batch}/{total_b} 완료 — 현재까지 {total_generated}개 생성됨")
 
-                    st.session_state.generated_reviews = list(parsed)
-                    st.session_state.review_edit_mode = True
-                    st.success(f"✅ {len(parsed)}개 리뷰 생성 완료!")
+                status_text.text(f"🚀 리뷰 생성 시작 (총 {total_batches}번 배치 호출)...")
 
-                except Exception as e:
-                    st.error(f"❌ 생성 실패: {e}")
+                parsed = generate_reviews_with_claude(
+                    client=ai_client,
+                    product_info=product_info,
+                    selling_points=selling_points,
+                    review_count=review_count,
+                    char_count=char_count,
+                    image_data=image_data,
+                    progress_callback=update_progress
+                )
+
+                progress_bar.progress(100)
+                status_text.empty()
+
+                st.session_state.generated_reviews = list(parsed)
+                st.session_state.review_edit_mode = True
+                st.success(f"✅ 총 {len(parsed)}개 리뷰 생성 완료!")
+
+            except Exception as e:
+                st.error(f"❌ 생성 실패: {e}")
 
     # ─── 결과 표시 + 수정 영역 ───────────────────
     if st.session_state.review_edit_mode and st.session_state.generated_reviews:
