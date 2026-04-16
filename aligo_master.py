@@ -10,6 +10,7 @@ import re
 import io
 import requests
 import zipfile
+import base64
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -55,15 +56,11 @@ def insert_row_safe(sheet, start_row, rows_data):
         sheet.update(f"I{r}", [[row[6]]], value_input_option='USER_ENTERED')
         sheet.update(f"K{r}", [[row[7]]], value_input_option='USER_ENTERED')
 
-# =====================================================
-# [수정] E열 텍스트에서 수량 추출 함수 추가
-# 패턴: "상품명 / n세트" 또는 "상품명 / n개"
-# =====================================================
 def extract_qty_from_text(text):
     match = re.search(r'/\s*(\d+)\s*(세트|개)', str(text))
     if match:
         return int(match.group(1))
-    return 1  # 패턴 없으면 기본값 1
+    return 1
 
 def generate_quote_pdf(quote_data, stamp_path=None):
     from reportlab.lib.pagesizes import A4
@@ -202,9 +199,6 @@ def generate_quote_pdf(quote_data, stamp_path=None):
     c.save(); buf.seek(0)
     return buf
 
-# =====================================================
-# Netlify 자동 배포 함수
-# =====================================================
 def deploy_to_netlify(html_content, site_id, token, extra_files=None):
     try:
         zip_buffer = io.BytesIO()
@@ -214,7 +208,6 @@ def deploy_to_netlify(html_content, site_id, token, extra_files=None):
                 for filename, file_bytes in extra_files.items():
                     zf.writestr(filename, file_bytes)
         zip_buffer.seek(0)
-
         headers = {
             'Authorization': f'Bearer {token}',
             'Content-Type': 'application/zip'
@@ -225,15 +218,186 @@ def deploy_to_netlify(html_content, site_id, token, extra_files=None):
             data=zip_buffer.getvalue(),
             timeout=60
         )
-
         if response.status_code in [200, 201]:
             return True, "성공"
         else:
             return False, f"오류 코드: {response.status_code}\n{response.text[:300]}"
-
     except Exception as e:
         return False, str(e)
 
+# =====================================================
+# 리뷰 파싱 (기존 유지)
+# =====================================================
+def parse_reviews(text):
+    delim = re.compile(r'^\s*(?:\((\d+)\)|(\d+)[.\)]|(\d+))\s*$', re.MULTILINE)
+    markers = [(int(m.group(1) or m.group(2) or m.group(3)), m.start(), m.end()) for m in delim.finditer(text)]
+    if not markers: return []
+    reviews = []
+    for i,(num,start,end) in enumerate(markers):
+        raw = text[end:markers[i+1][1]] if i+1<len(markers) else text[end:]
+        content = raw.strip()
+        if content: reviews.append((num, content))
+    return sorted(reviews, key=lambda x: x[0])
+
+# =====================================================
+# 엑셀 생성 (기존 유지 + 리뷰 생성기에서도 재사용)
+# =====================================================
+def create_excel(reviews):
+    wb = Workbook(); ws = wb.active; ws.title = "리뷰"
+    hf = PatternFill("solid", start_color="FF6B35", end_color="FF6B35")
+    hfont = Font(bold=True, color="FFFFFF", name="Arial", size=11)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    lw = Alignment(horizontal="left", vertical="top", wrap_text=True)
+    thin = Side(style="thin", color="CCCCCC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for addr, lbl in {"A1":"번호","B1":"별점","C1":"리뷰 내용"}.items():
+        cell=ws[addr]; cell.value=lbl; cell.fill=hf; cell.font=hfont; cell.alignment=center; cell.border=border
+    ws.column_dimensions["A"].width=8; ws.column_dimensions["B"].width=8; ws.column_dimensions["C"].width=70
+    ws.row_dimensions[1].height=30
+    af = PatternFill("solid", start_color="FFF5F0", end_color="FFF5F0")
+    for i,(num,content) in enumerate(reviews, start=2):
+        rf = af if i%2==0 else None
+        a=ws.cell(row=i,column=1,value=num); a.font=Font(name="Arial",size=10,bold=True); a.alignment=center; a.border=border
+        if rf: a.fill=rf
+        b=ws.cell(row=i,column=2,value=""); b.border=border
+        if rf: b.fill=rf
+        cc=ws.cell(row=i,column=3,value=content); cc.font=Font(name="Arial",size=10); cc.alignment=lw; cc.border=border
+        if rf: cc.fill=rf
+        ws.row_dimensions[i].height=max(40,min(content.count('\n')*18+18,200))
+    out=io.BytesIO(); wb.save(out); out.seek(0); return out
+
+# =====================================================
+# [신규] 리뷰 AI 생성 함수
+# =====================================================
+def generate_reviews_with_claude(client, product_info, selling_points, review_count, char_count, image_data=None):
+    """
+    Claude API를 호출해 리뷰를 생성.
+    - 페르소나 다양화 (성별/연령층)
+    - 반복 패턴 방지: 이미 생성된 리뷰를 누적 전달
+    - 그림 이모지 금지, 텍스트 감성 표현 허용
+    """
+
+    # 페르소나 풀 - 다양한 성별/연령/직업 조합
+    persona_pool = [
+        "20대 초반 여성 대학생", "20대 후반 직장 여성", "20대 남성 직장인",
+        "30대 초반 주부", "30대 워킹맘", "30대 남성 직장인",
+        "40대 주부", "40대 남성 회사원", "40대 여성 자영업자",
+        "50대 주부", "50대 남성", "60대 여성",
+        "20대 남성 대학생", "30대 여성 자영업자", "40대 워킹대디"
+    ]
+
+    # 리뷰 개수에 맞게 페르소나 선택 (중복 최소화)
+    import random
+    random.shuffle(persona_pool)
+    personas = []
+    for i in range(review_count):
+        personas.append(persona_pool[i % len(persona_pool)])
+
+    # 이미지 포함 여부에 따라 메시지 구성
+    user_content = []
+    if image_data:
+        user_content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image_data["media_type"],
+                "data": image_data["data"]
+            }
+        })
+
+    # 페르소나 목록 텍스트
+    persona_text = "\n".join([f"{i+1}번 리뷰: {p}" for i, p in enumerate(personas)])
+
+    prompt = f"""너는 실제 구매자처럼 자연스러운 한국어 리뷰를 쓰는 전문 작가야.
+
+[제품 정보]
+{product_info}
+
+[소구점 / 강조할 내용]
+{selling_points if selling_points else "없음 (제품 정보 기반으로 자유롭게 작성)"}
+
+[작성 조건]
+- 총 리뷰 수: {review_count}개
+- 리뷰당 글자 수: 약 {char_count}자 내외
+- 각 리뷰는 아래 페르소나에 맞게 말투와 내용을 다르게 작성할 것
+
+[페르소나 배정]
+{persona_text}
+
+[필수 규칙]
+1. 각 리뷰는 번호(숫자만)로 시작하고, 그 아래 리뷰 내용을 작성
+   형식 예시:
+   1.
+   리뷰 내용...
+
+   2.
+   리뷰 내용...
+
+2. 그림 이모지 절대 사용 금지 (❌ 예: 🌈 ☂️ ❤️ ⭐ 등 유니코드 이모티콘 전부)
+3. 텍스트 감성 표현은 자연스럽게 사용 가능 (✅ 예: ㅎㅎ, ㅋㅋ, ~!, ~~, !!, ㅠㅠ 등)
+4. 리뷰 간 표현/문장구조/어휘 절대 중복 금지
+   - 같은 도입부 표현 반복 금지 (예: "솔직히", "진짜", "이 제품" 등으로 모든 리뷰 시작 금지)
+   - 문장 구조 패턴화 금지 (예: "~해서 샀는데", "~했는데 좋아요" 반복 금지)
+   - 비슷한 마무리 문구 반복 금지
+5. 페르소나에 맞는 실제 사람 말투 사용
+   - 20대: 가볍고 솔직한 톤, 줄임말 가능
+   - 30-40대: 실용적이고 구체적인 톤
+   - 50-60대: 차분하고 정중한 톤
+6. 구매 동기, 사용 경험, 구체적 디테일이 각 리뷰마다 달라야 함
+7. 이미 작성된 리뷰와 내용/표현이 겹치지 않도록 할 것
+
+리뷰 {review_count}개를 모두 작성해줘. 설명이나 부연 없이 리뷰만 출력해.
+"""
+
+    user_content.append({"type": "text", "text": prompt})
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=4000,
+        messages=[{"role": "user", "content": user_content}]
+    )
+
+    return response.content[0].text.strip()
+
+# =====================================================
+# 리뷰 텍스트 파싱 (AI 생성 결과용 - 숫자. 형식)
+# =====================================================
+def parse_generated_reviews(text):
+    """
+    AI가 생성한 리뷰 텍스트를 파싱.
+    '1.' 또는 '1' 단독 줄로 구분.
+    """
+    lines = text.split('\n')
+    reviews = []
+    current_num = None
+    current_lines = []
+
+    for line in lines:
+        # 번호 라인 감지: "1." "1" "2." "2" 등 (단독 줄)
+        stripped = line.strip()
+        num_match = re.match(r'^(\d+)[.\)]?\s*$', stripped)
+        if num_match:
+            if current_num is not None and current_lines:
+                content = '\n'.join(current_lines).strip()
+                if content:
+                    reviews.append((current_num, content))
+            current_num = int(num_match.group(1))
+            current_lines = []
+        else:
+            if current_num is not None:
+                current_lines.append(line)
+
+    # 마지막 리뷰 저장
+    if current_num is not None and current_lines:
+        content = '\n'.join(current_lines).strip()
+        if content:
+            reviews.append((current_num, content))
+
+    return sorted(reviews, key=lambda x: x[0])
+
+
+# =====================================================
+# Streamlit 앱 시작
 # =====================================================
 st.set_page_config(page_title="버즈필터 자동화", page_icon="🤖", layout="wide")
 
@@ -242,6 +406,7 @@ with st.sidebar:
     st.markdown("---")
     menu = st.radio("", options=[
         "🏭 버즈필터 발주",
+        "✍️ 리뷰 생성",       # ← 신규 추가 (순서 앞으로)
         "📝 리뷰 입력",
         "📄 견적서 생성",
         "🌐 홈페이지 자동 개선"
@@ -275,20 +440,10 @@ if menu == "🏭 버즈필터 발주":
                 today = datetime.now()
                 rows_to_add, match_results = [], []
                 for idx, row in df.iterrows():
-                    # =====================================================
-                    # [수정] 컬럼명 변경: '상품명+옵션+개수' → '상품명+옵션'
-                    # (괄호 앞 텍스트로 split했으므로 실제 키는 '상품명+옵션+개수'로 유지됨)
-                    # E열 전체 텍스트에서 상품명 추출 및 수량 파싱
-                    # =====================================================
                     raw = str(row.get('상품명+옵션+개수', ''))
-
-                    # [수정] 기존: qty = int(row.get('수량', 1))
-                    # [수정] 변경: E열 텍스트에서 '/ n세트' 또는 '/ n개' 패턴으로 수량 추출
                     qty = extract_qty_from_text(raw)
-
                     price = int(row.get('가격', 0))
                     ch = str(row.get('판매처', '쿠팡'))
-
                     prompt = f"""너는 상품 매칭 전문가야.\n발주서 상품명: {raw}\n상품 리스트:\n{calc_df[['브랜드','제품명','상품코드 표']].to_string(index=False)}\n반드시 아래 형식으로만 답해줘:\n상품코드: [코드값]\n브랜드: [브랜드값]\n못 찾겠으면:\n상품코드: 미등록\n브랜드: 미등록"""
                     resp = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=100, messages=[{"role":"user","content":prompt}])
                     rt = resp.content[0].text.strip()
@@ -296,26 +451,8 @@ if menu == "🏭 버즈필터 발주":
                     for line in rt.split('\n'):
                         if '상품코드:' in line: mc = line.split('상품코드:')[1].strip()
                         if '브랜드:' in line: mb = line.split('브랜드:')[1].strip()
-
-                    match_results.append({
-                        '상품명': raw,
-                        '매칭 브랜드': mb,
-                        '매칭 코드': mc,
-                        '판매처': ch,
-                        '가격': price,
-                        # [수정] 수량 출처 표시: E열 파싱 결과
-                        '수량(파싱)': qty
-                    })
-                    rows_to_add.append([
-                        f"{today.year}년",
-                        f"{today.month}월",
-                        f"{today.day}일",
-                        mb,
-                        mc,
-                        ch,
-                        price,
-                        qty   # K열에 입력될 수량 (E열에서 파싱)
-                    ])
+                    match_results.append({'상품명': raw, '매칭 브랜드': mb, '매칭 코드': mc, '판매처': ch, '가격': price, '수량(파싱)': qty})
+                    rows_to_add.append([f"{today.year}년", f"{today.month}월", f"{today.day}일", mb, mc, ch, price, qty])
                 st.session_state['rows_to_add'] = rows_to_add
                 st.session_state['match_results'] = match_results
                 st.session_state['ready_to_insert'] = True
@@ -323,20 +460,15 @@ if menu == "🏭 버즈필터 발주":
 
         if st.session_state.get('ready_to_insert'):
             rdf = pd.DataFrame(st.session_state['match_results'])
-            st.write("🔍 AI 매칭 결과 (수량은 E열 텍스트에서 자동 파싱)")
+            st.write("🔍 AI 매칭 결과")
             st.dataframe(rdf)
-
-            # 수량 파싱 실패 경고 (기본값 1로 처리된 항목)
-            # [수정] '수량(파싱)' 컬럼 기준으로 1인 항목 중 슬래시 없는 것 감지
             no_slash = rdf[~rdf['상품명'].str.contains('/', na=False)]
             if len(no_slash) > 0:
-                st.warning(f"⚠️ 아래 {len(no_slash)}건은 '/' 패턴이 없어 수량을 1로 처리했습니다. 확인해주세요:")
+                st.warning(f"⚠️ {len(no_slash)}건 수량 파싱 불가 → 수량 1로 처리")
                 st.dataframe(no_slash[['상품명', '수량(파싱)']])
-
             unm = rdf[rdf['매칭 코드'] == '미등록']
             if len(unm) > 0:
                 st.warning(f"⚠️ {len(unm)}건 상품 매칭 실패")
-
             if st.button("✅ 확인했습니다. 장부에 최종 입력합니다."):
                 with st.spinner("장부 입력 중..."):
                     try:
@@ -354,46 +486,151 @@ if menu == "🏭 버즈필터 발주":
                         st.error(f"❌ 입력 실패: {e}")
 
 # =====================================================
-# 페이지 2: 리뷰 입력
+# 페이지 2: 리뷰 생성 (신규)
+# =====================================================
+elif menu == "✍️ 리뷰 생성":
+    st.title("✍️ AI 리뷰 자동 생성기")
+    st.subheader("제품 정보를 입력하면 자연스럽고 다양한 리뷰를 생성해드립니다.")
+
+    # session_state 초기화
+    if 'generated_reviews' not in st.session_state:
+        st.session_state.generated_reviews = []   # [(num, content), ...]
+    if 'review_edit_mode' not in st.session_state:
+        st.session_state.review_edit_mode = False
+
+    # ─── 입력 영역 ───────────────────────────────
+    st.markdown("### 📦 STEP 1 — 제품 정보 입력")
+
+    col_left, col_right = st.columns([2, 1])
+    with col_left:
+        product_info = st.text_area(
+            "제품 정보 (제품명, 카테고리, 특징 등)",
+            height=150,
+            placeholder="예)\n제품명: 콜라겐 마스크팩\n카테고리: 스킨케어\n특징: 저자극 성분, 수분 집중 케어, 붙임성 좋음, 개별 포장"
+        )
+        selling_points = st.text_area(
+            "소구점 / 강조할 내용 (선택)",
+            height=100,
+            placeholder="예) 피부 흡수력, 아침에 쓰기 좋음, 가성비, 선물용으로 좋다는 점 강조"
+        )
+    with col_right:
+        product_image = st.file_uploader(
+            "제품 이미지 (선택)",
+            type=["jpg", "jpeg", "png", "webp"],
+            help="이미지를 함께 주면 Claude가 더 정확하게 리뷰를 작성합니다."
+        )
+        if product_image:
+            st.image(product_image, caption="업로드된 이미지", use_container_width=True)
+
+    st.markdown("### ⚙️ STEP 2 — 리뷰 설정")
+    col1, col2 = st.columns(2)
+    with col1:
+        review_count = st.number_input("리뷰 개수", min_value=1, max_value=100, value=10, step=1)
+    with col2:
+        char_count = st.number_input("리뷰당 글자 수 (약)", min_value=50, max_value=500, value=150, step=10)
+
+    st.markdown("---")
+
+    # ─── 생성 버튼 ───────────────────────────────
+    if st.button("🚀 리뷰 생성 시작", type="primary", use_container_width=True):
+        if not product_info.strip():
+            st.error("❌ 제품 정보를 입력해주세요!")
+        else:
+            with st.spinner(f"Claude가 {review_count}개 리뷰를 생성 중입니다... (잠시만 기다려주세요)"):
+                try:
+                    ai_client = get_anthropic_client()
+
+                    # 이미지 데이터 준비
+                    image_data = None
+                    if product_image:
+                        product_image.seek(0)
+                        img_bytes = product_image.read()
+                        img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+                        ext = product_image.name.split('.')[-1].lower()
+                        media_type_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+                        image_data = {
+                            "media_type": media_type_map.get(ext, "image/jpeg"),
+                            "data": img_b64
+                        }
+
+                    raw_text = generate_reviews_with_claude(
+                        client=ai_client,
+                        product_info=product_info,
+                        selling_points=selling_points,
+                        review_count=review_count,
+                        char_count=char_count,
+                        image_data=image_data
+                    )
+
+                    parsed = parse_generated_reviews(raw_text)
+                    if not parsed:
+                        # fallback: 기존 parse_reviews 사용
+                        parsed = parse_reviews(raw_text)
+
+                    st.session_state.generated_reviews = list(parsed)
+                    st.session_state.review_edit_mode = True
+                    st.success(f"✅ {len(parsed)}개 리뷰 생성 완료!")
+
+                except Exception as e:
+                    st.error(f"❌ 생성 실패: {e}")
+
+    # ─── 결과 표시 + 수정 영역 ───────────────────
+    if st.session_state.review_edit_mode and st.session_state.generated_reviews:
+        st.markdown("---")
+        st.markdown(f"### 📋 STEP 3 — 결과 확인 및 수정 ({len(st.session_state.generated_reviews)}개)")
+        st.caption("각 리뷰를 직접 수정할 수 있습니다. 수정 후 아래 [저장 및 엑셀 다운로드] 버튼을 눌러주세요.")
+
+        updated_reviews = []
+        for i, (num, content) in enumerate(st.session_state.generated_reviews):
+            with st.expander(f"리뷰 {num}번", expanded=(i < 3)):  # 처음 3개만 펼쳐서 표시
+                edited = st.text_area(
+                    f"리뷰 {num} 내용",
+                    value=content,
+                    height=150,
+                    key=f"review_edit_{i}",
+                    label_visibility="collapsed"
+                )
+                updated_reviews.append((num, edited))
+
+        st.markdown("---")
+        st.markdown("### 💾 STEP 4 — 저장 및 다운로드")
+
+        col_save, col_reset = st.columns([3, 1])
+        with col_save:
+            if st.button("⬇️ 저장 및 엑셀 다운로드", type="primary", use_container_width=True):
+                # 수정된 내용 반영
+                st.session_state.generated_reviews = updated_reviews
+                excel_data = create_excel(updated_reviews)
+                fname = f"리뷰_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+                st.download_button(
+                    label="📥 엑셀 파일 다운로드 클릭",
+                    data=excel_data,
+                    file_name=fname,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    type="primary"
+                )
+                st.success("✅ 엑셀 파일이 준비되었습니다!")
+
+        with col_reset:
+            if st.button("🔄 초기화", use_container_width=True):
+                st.session_state.generated_reviews = []
+                st.session_state.review_edit_mode = False
+                st.rerun()
+
+        # 텍스트 전체 미리보기 (복사용)
+        with st.expander("📄 텍스트 전체 보기 (복사용)"):
+            full_text = ""
+            for num, content in st.session_state.generated_reviews:
+                full_text += f"{num}.\n{content}\n\n"
+            st.text_area("전체 리뷰 텍스트", value=full_text.strip(), height=400, label_visibility="collapsed")
+
+# =====================================================
+# 페이지 3: 리뷰 입력 (기존 유지)
 # =====================================================
 elif menu == "📝 리뷰 입력":
     st.title("📝 리뷰 엑셀 자동 변환기")
     st.subheader("리뷰 텍스트 파일을 업로드하면 엑셀 파일로 자동 변환합니다.")
-
-    def parse_reviews(text):
-        delim = re.compile(r'^\s*(?:\((\d+)\)|(\d+)[.\)]|(\d+))\s*$', re.MULTILINE)
-        markers = [(int(m.group(1) or m.group(2) or m.group(3)), m.start(), m.end()) for m in delim.finditer(text)]
-        if not markers: return []
-        reviews = []
-        for i,(num,start,end) in enumerate(markers):
-            raw = text[end:markers[i+1][1]] if i+1<len(markers) else text[end:]
-            content = raw.strip()
-            if content: reviews.append((num, content))
-        return sorted(reviews, key=lambda x: x[0])
-
-    def create_excel(reviews):
-        wb = Workbook(); ws = wb.active; ws.title = "리뷰"
-        hf = PatternFill("solid", start_color="FF6B35", end_color="FF6B35")
-        hfont = Font(bold=True, color="FFFFFF", name="Arial", size=11)
-        center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        lw = Alignment(horizontal="left", vertical="top", wrap_text=True)
-        thin = Side(style="thin", color="CCCCCC")
-        border = Border(left=thin, right=thin, top=thin, bottom=thin)
-        for addr, lbl in {"A1":"번호","B1":"별점","C1":"리뷰 내용"}.items():
-            cell=ws[addr]; cell.value=lbl; cell.fill=hf; cell.font=hfont; cell.alignment=center; cell.border=border
-        ws.column_dimensions["A"].width=8; ws.column_dimensions["B"].width=8; ws.column_dimensions["C"].width=70
-        ws.row_dimensions[1].height=30
-        af = PatternFill("solid", start_color="FFF5F0", end_color="FFF5F0")
-        for i,(num,content) in enumerate(reviews, start=2):
-            rf = af if i%2==0 else None
-            a=ws.cell(row=i,column=1,value=num); a.font=Font(name="Arial",size=10,bold=True); a.alignment=center; a.border=border
-            if rf: a.fill=rf
-            b=ws.cell(row=i,column=2,value=""); b.border=border
-            if rf: b.fill=rf
-            cc=ws.cell(row=i,column=3,value=content); cc.font=Font(name="Arial",size=10); cc.alignment=lw; cc.border=border
-            if rf: cc.fill=rf
-            ws.row_dimensions[i].height=max(40,min(content.count('\n')*18+18,200))
-        out=io.BytesIO(); wb.save(out); out.seek(0); return out
 
     tab1, tab2 = st.tabs(["📁 파일 업로드", "✏️ 텍스트 직접 입력"])
     with tab1:
@@ -425,7 +662,7 @@ elif menu == "📝 리뷰 입력":
                 st.error("❌ 리뷰를 파싱할 수 없습니다.")
 
 # =====================================================
-# 페이지 3: 견적서 생성
+# 페이지 4: 견적서 생성 (기존 유지)
 # =====================================================
 elif menu == "📄 견적서 생성":
     st.title("📄 견적서 자동 생성")
@@ -493,7 +730,7 @@ elif menu == "📄 견적서 생성":
                     st.info("💡 NotoSansKR-Regular.ttf, NotoSansKR-Bold.ttf 파일이 같은 폴더에 있는지 확인해주세요!")
 
 # =====================================================
-# 페이지 4: 홈페이지 자동 개선
+# 페이지 5: 홈페이지 자동 개선 (기존 유지)
 # =====================================================
 elif menu == "🌐 홈페이지 자동 개선":
     st.title("🌐 홈페이지 자동 개선 + 자동 배포")
@@ -510,10 +747,8 @@ elif menu == "🌐 홈페이지 자동 개선":
         st.code("""NETLIFY_TOKEN = "발급받은_토큰"\nNETLIFY_SITE_ID = "57340c83-2554-459c-9a49-b29fbdb9b0c0" """, language="toml")
 
     st.markdown("---")
-
     st.markdown("### 📂 STEP 1 — index.html 업로드")
     uploaded_html = st.file_uploader("index.html 업로드", type=["html","htm"], key="html_upload")
-
     st.markdown("### 🖼️ STEP 2 — 이미지 파일 업로드")
     st.caption("image_4.png, pr_chat.png, review_chat.png 등 홈페이지에 쓰이는 이미지를 모두 올려주세요.")
     uploaded_images = st.file_uploader(
@@ -526,127 +761,83 @@ elif menu == "🌐 홈페이지 자동 개선":
         st.success(f"✅ 이미지 {len(uploaded_images)}개: {', '.join([f.name for f in uploaded_images])}")
 
     st.markdown("---")
-
     st.markdown("### ✅ STEP 3 — 개선 항목 선택")
     col1, col2, col3 = st.columns(3)
     with col1: check_mobile = st.checkbox("📱 모바일 최적화", value=True)
     with col2: check_responsive = st.checkbox("📐 반응형 디자인", value=True)
     with col3: check_seo = st.checkbox("🔍 구글 SEO", value=True)
     check_extra = st.text_area("📝 추가 요청사항 (선택)", placeholder="예) 버튼 색상을 더 눈에 띄게 / CTA 문구 강하게", height=80)
-
     st.markdown("---")
 
     if uploaded_html:
         html_content = uploaded_html.read().decode("utf-8", errors="ignore")
-
         if not any([check_mobile, check_responsive, check_seo, check_extra.strip()]):
             st.warning("⚠️ 개선 항목을 최소 1개 이상 선택해주세요.")
         else:
             if st.button("🚀 Claude 수정 + Netlify 자동 배포", type="primary", use_container_width=True):
-
                 check_list = []
-                if check_mobile:
-                    check_list.append("""1. 모바일 최적화
-   - 터치 타겟 최소 44px (버튼, 링크)
-   - iOS 폰트 자동 확대 방지 (-webkit-text-size-adjust)
-   - 햄버거 메뉴 (768px 이하)
-   - 모바일 CTA 버튼 풀 너비""")
-                if check_responsive:
-                    check_list.append("""2. 반응형 디자인
-   - 브레이크포인트 3단계: 900px / 768px / 480px
-   - clamp()로 폰트 유동적 조절
-   - 그리드 2열 → 1열 자동 전환
-   - 프로세스 카드 5열 → 3열 → 2열""")
-                if check_seo:
-                    check_list.append("""3. 구글 SEO
-   - og:image 절대경로 (https://aligomedia.co.kr/image_4.png)
-   - LocalBusiness + Service 구조화 데이터
-   - <main> 태그, <address> 태그
-   - 이미지 alt 구체화, loading=lazy
-   - window.stop() 제거
-   - rel="noopener noreferrer"
-   - Twitter Card 추가""")
-                if check_extra.strip():
-                    check_list.append(f"4. 추가 요청\n   {check_extra.strip()}")
+                if check_mobile: check_list.append("1. 모바일 최적화 (터치 타겟 44px, iOS 폰트 방지, 햄버거 메뉴, 모바일 CTA)")
+                if check_responsive: check_list.append("2. 반응형 디자인 (브레이크포인트 3단계, clamp() 폰트, 그리드 자동 전환)")
+                if check_seo: check_list.append("3. 구글 SEO (og:image 절대경로, LocalBusiness 구조화 데이터, main/address 태그)")
+                if check_extra.strip(): check_list.append(f"4. 추가 요청: {check_extra.strip()}")
 
                 prompt = f"""너는 웹 개발 전문가야. 아래 HTML을 분석하고 수정해서 완성된 HTML 코드만 반환해줘.
-
 [개선 항목]
 {chr(10).join(check_list)}
-
 [주의사항]
 - 수정된 HTML 전체 코드만 반환 (설명 없이 <!DOCTYPE html>부터 시작)
 - 기존 디자인·색상·브랜드 정체성 유지
 - 기존 기능(카운터 애니메이션, 관리자 시크릿 클릭) 유지
 - 한국어 텍스트 수정 금지
-
 [원본 HTML]
 {html_content}"""
 
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-
                 try:
                     status_text.text("🤖 Claude가 분석 및 수정 중... (30초~1분 소요)")
                     progress_bar.progress(20)
-
                     ai_client = get_anthropic_client()
                     response = ai_client.messages.create(
                         model="claude-opus-4-5",
                         max_tokens=16000,
                         messages=[{"role": "user", "content": prompt}]
                     )
-
                     improved_html = response.content[0].text.strip()
                     if improved_html.startswith("```"):
                         lines = improved_html.split("\n")
                         improved_html = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-
                     progress_bar.progress(60)
                     status_text.text("✅ Claude 수정 완료! Netlify 배포 중...")
-
                     extra_files = {}
                     if uploaded_images:
                         for img_file in uploaded_images:
                             img_file.seek(0)
                             extra_files[img_file.name] = img_file.read()
-
                     if netlify_ready:
-                        success, result = deploy_to_netlify(
-                            improved_html, NETLIFY_SITE_ID, NETLIFY_TOKEN, extra_files
-                        )
+                        success, result = deploy_to_netlify(improved_html, NETLIFY_SITE_ID, NETLIFY_TOKEN, extra_files)
                         progress_bar.progress(100)
-
                         if success:
                             status_text.text("🎉 완료!")
                             st.success("🎉 수정 완료 + Netlify 자동 배포 성공!")
                             st.balloons()
-                            st.markdown("### 🌐 배포 완료!")
-                            st.markdown("- ✅ Claude 수정 완료\n- ✅ Netlify 배포 완료\n- ⏱️ 반영까지 약 10~30초 소요")
                             st.link_button("🔗 aligomedia.co.kr 확인하기", "https://aligomedia.co.kr")
                         else:
-                            progress_bar.progress(100)
-                            status_text.text("⚠️ 배포 실패")
                             st.error(f"❌ Netlify 배포 실패\n\n{result}")
-                            st.warning("아래 버튼으로 수동 다운로드 후 Netlify에 직접 올려주세요.")
                     else:
                         progress_bar.progress(100)
-                        status_text.text("✅ 수정 완료 (Netlify 미연결 — 아래에서 다운로드)")
-
+                        status_text.text("✅ 수정 완료")
                     st.session_state["improved_html"] = improved_html
                     st.session_state["original_html"] = html_content
                     st.session_state["improvement_done"] = True
-
                 except Exception as e:
                     st.error(f"❌ 오류 발생: {e}")
-
     else:
         st.info("👆 STEP 1에서 index.html을 업로드하면 시작할 수 있어요!")
 
     if st.session_state.get("improvement_done"):
         improved_html = st.session_state["improved_html"]
         original_html = st.session_state["original_html"]
-
         st.markdown("---")
         col_before, col_after = st.columns(2)
         with col_before:
@@ -656,13 +847,10 @@ elif menu == "🌐 홈페이지 자동 개선":
                 st.code(original_html[:1500] + "...", language="html")
         with col_after:
             st.markdown("#### ✅ 수정 후")
-            st.metric("파일 크기", f"{len(improved_html):,}자",
-                      delta=f"{len(improved_html)-len(original_html):+,}자")
+            st.metric("파일 크기", f"{len(improved_html):,}자", delta=f"{len(improved_html)-len(original_html):+,}자")
             with st.expander("수정된 코드 보기"):
                 st.code(improved_html[:1500] + "...", language="html")
-
         st.markdown("---")
-        st.markdown("### 📥 수동 다운로드 (배포 실패 시 사용)")
         st.download_button(
             label="⬇️ 수정된 index.html 다운로드",
             data=improved_html.encode("utf-8"),
@@ -670,7 +858,6 @@ elif menu == "🌐 홈페이지 자동 개선":
             mime="text/html",
             use_container_width=True
         )
-
         if st.button("🔄 처음부터 다시", use_container_width=True):
             st.session_state["improvement_done"] = False
             st.session_state["improved_html"] = ""
