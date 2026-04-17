@@ -270,10 +270,55 @@ def create_excel(reviews):
 # =====================================================
 # [신규] 리뷰 AI 생성 함수 - 배치 분할 방식
 # =====================================================
-def generate_reviews_with_claude(client, product_info, selling_points, review_count, char_count, image_data=None, progress_callback=None):
+
+def analyze_images_with_claude(client, image_data_list):
+    """
+    ✅ 방법2: 이미지를 먼저 분석해서 텍스트 설명 추출
+    → 이후 모든 배치에 이 텍스트를 포함시켜 이미지 없이도 동일한 품질 유지
+    """
+    if not image_data_list:
+        return ""
+
+    content = []
+    for img in image_data_list:
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": img["media_type"],
+                "data": img["data"]
+            }
+        })
+    content.append({
+        "type": "text",
+        "text": """이 제품 이미지들을 분석해서 리뷰 작성에 활용할 수 있도록 아래 항목을 상세하게 설명해줘.
+
+1. 제품 외관 및 디자인 (색상, 형태, 크기감, 패키징)
+2. 제품에 표시된 텍스트, 로고, 브랜드명, 성분 등
+3. 제품의 재질감, 질감, 마감 느낌
+4. 이미지에서 보이는 특징적인 요소들 (버튼, 뚜껑, 용량 표시 등)
+5. 전반적인 제품 분위기 (고급스러움, 실용적, 귀여운 등)
+
+리뷰 작가가 실제로 제품을 써본 것처럼 묘사할 수 있도록 구체적으로 써줘. 설명만 출력해."""
+    })
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1000,
+        messages=[{"role": "user", "content": content}]
+    )
+    return response.content[0].text.strip()
+
+
+def generate_reviews_with_claude(client, product_info, selling_points, review_count, char_count, image_data_list=None, progress_callback=None):
     import random
 
     BATCH_SIZE = 20
+
+    # ✅ 방법2: 배치 시작 전에 이미지 분석 먼저 수행
+    image_description = ""
+    if image_data_list:
+        image_description = analyze_images_with_claude(client, image_data_list)
 
     persona_pool = [
         "20대 초반 여성 대학생", "20대 중반 직장 여성", "20대 후반 직장 여성",
@@ -327,17 +372,15 @@ def generate_reviews_with_claude(client, product_info, selling_points, review_co
                 prev_lines.append(f"- {num}번: {first_line}...")
             prev_summary = "\n[이미 작성된 리뷰 도입부 (절대 유사하게 쓰지 말 것)]\n" + "\n".join(prev_lines)
 
-        user_content = []
-        if image_data and batch_idx == 0:
-            user_content.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": image_data["media_type"],
-                    "data": image_data["data"]
-                }
-            })
+        # ✅ 방법2: 이미지 없이 텍스트 설명만 프롬프트에 포함 (모든 배치 동일 품질)
+        image_section = ""
+        if image_description:
+            image_section = f"""
+[제품 이미지 분석 결과 - 이 내용을 바탕으로 실제 제품을 본 것처럼 리뷰에 자연스럽게 반영해라]
+{image_description}
+"""
 
+        user_content = []
         prompt = f"""너는 실제 구매자처럼 자연스러운 한국어 리뷰를 쓰는 전문 작가야.
 
 [제품 정보]
@@ -345,7 +388,7 @@ def generate_reviews_with_claude(client, product_info, selling_points, review_co
 
 [소구점 / 강조할 내용]
 {selling_points if selling_points else "없음 (제품 정보 기반으로 자유롭게 작성)"}
-
+{image_section}
 [작성 조건]
 - 이번 배치: {global_start_num}번 ~ {end}번 리뷰 (총 {batch_count}개)
 - 리뷰당 글자 수: 약 {char_count}자 내외
@@ -567,13 +610,15 @@ elif menu == "✍️ 리뷰 생성":
             placeholder="예) 피부 흡수력, 아침에 쓰기 좋음, 가성비, 선물용으로 좋다는 점 강조"
         )
     with col_right:
-        product_image = st.file_uploader(
-            "제품 이미지 (선택)",
+        product_images = st.file_uploader(
+            "제품 이미지 (선택, 여러 장 가능)",
             type=["jpg", "jpeg", "png", "webp"],
-            help="이미지를 함께 주면 Claude가 더 정확하게 리뷰를 작성합니다."
+            accept_multiple_files=True,
+            help="이미지를 여러 장 올리면 Claude가 더 정확하게 리뷰를 작성합니다."
         )
-        if product_image:
-            st.image(product_image, caption="업로드된 이미지", use_container_width=True)
+        if product_images:
+            for img in product_images:
+                st.image(img, caption=img.name, use_container_width=True)
 
     st.markdown("### ⚙️ STEP 2 — 리뷰 설정")
     col1, col2 = st.columns(2)
@@ -594,17 +639,19 @@ elif menu == "✍️ 리뷰 생성":
             try:
                 ai_client = get_anthropic_client()
 
-                image_data = None
-                if product_image:
-                    product_image.seek(0)
-                    img_bytes = product_image.read()
-                    img_b64 = base64.b64encode(img_bytes).decode('utf-8')
-                    ext = product_image.name.split('.')[-1].lower()
-                    media_type_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
-                    image_data = {
-                        "media_type": media_type_map.get(ext, "image/jpeg"),
-                        "data": img_b64
-                    }
+                # ✅ 수정: 여러 장 이미지 리스트로 변환
+                image_data_list = []
+                media_type_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+                if product_images:
+                    for product_image in product_images:
+                        product_image.seek(0)
+                        img_bytes = product_image.read()
+                        img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+                        ext = product_image.name.split('.')[-1].lower()
+                        image_data_list.append({
+                            "media_type": media_type_map.get(ext, "image/jpeg"),
+                            "data": img_b64
+                        })
 
                 progress_bar = st.progress(0)
                 status_text = st.empty()
@@ -614,6 +661,8 @@ elif menu == "✍️ 리뷰 생성":
                     progress_bar.progress(pct)
                     status_text.text(f"⏳ 배치 {current_batch}/{total_b} 완료 — 현재까지 {total_generated}개 생성됨")
 
+                if image_data_list:
+                    status_text.text("🔍 이미지 분석 중... (제품 특징 추출)")
                 status_text.text(f"🚀 리뷰 생성 시작 (총 {total_batches}번 배치 호출)...")
 
                 parsed = generate_reviews_with_claude(
@@ -622,7 +671,7 @@ elif menu == "✍️ 리뷰 생성":
                     selling_points=selling_points,
                     review_count=review_count,
                     char_count=char_count,
-                    image_data=image_data,
+                    image_data_list=image_data_list,
                     progress_callback=update_progress
                 )
 
