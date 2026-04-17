@@ -271,17 +271,10 @@ def create_excel(reviews):
 # [신규] 리뷰 AI 생성 함수 - 배치 분할 방식
 # =====================================================
 def generate_reviews_with_claude(client, product_info, selling_points, review_count, char_count, image_data=None, progress_callback=None):
-    """
-    Claude API를 배치(20개씩) 분할 호출해 리뷰를 생성.
-    - 페르소나 다양화 (성별/연령층) - 50개 풀
-    - 반복 패턴 방지: 이전 배치 결과를 다음 배치 컨텍스트로 전달
-    - 그림 이모지 금지, 텍스트 감성 표현 허용
-    """
     import random
 
-    BATCH_SIZE = 20  # 한 번에 생성할 리뷰 수
+    BATCH_SIZE = 20
 
-    # 페르소나 풀 - 50개 (100개 요청해도 다양하게 배정 가능)
     persona_pool = [
         "20대 초반 여성 대학생", "20대 중반 직장 여성", "20대 후반 직장 여성",
         "20대 초반 남성 대학생", "20대 후반 남성 직장인",
@@ -304,13 +297,11 @@ def generate_reviews_with_claude(client, product_info, selling_points, review_co
         "50대 여성 교사", "60대 여성 주부", "30대 워킹대디", "40대 워킹대디"
     ]
 
-    # 전체 리뷰에 페르소나 배정 (셔플 후 순환)
     random.shuffle(persona_pool)
     all_personas = [persona_pool[i % len(persona_pool)] for i in range(review_count)]
 
-    all_reviews = []  # 누적 결과
+    all_reviews = []
 
-    # 배치 분할
     batches = []
     for start in range(0, review_count, BATCH_SIZE):
         end = min(start + BATCH_SIZE, review_count)
@@ -320,25 +311,22 @@ def generate_reviews_with_claude(client, product_info, selling_points, review_co
         batch_num = batch_idx + 1
         batch_personas = all_personas[start:end]
         batch_count = end - start
-        global_start_num = start + 1  # 전체 기준 시작 번호
+        global_start_num = start + 1
 
         persona_text = "\n".join([
             f"{global_start_num + i}번 리뷰: {p}"
             for i, p in enumerate(batch_personas)
         ])
 
-        # 이미 생성된 리뷰 요약 (반복 패턴 방지용) - 최근 20개만
         prev_summary = ""
         if all_reviews:
             recent = all_reviews[-20:]
             prev_lines = []
             for num, content in recent:
-                # 첫 줄만 추출해서 간결하게
                 first_line = content.split('\n')[0][:60]
                 prev_lines.append(f"- {num}번: {first_line}...")
             prev_summary = "\n[이미 작성된 리뷰 도입부 (절대 유사하게 쓰지 말 것)]\n" + "\n".join(prev_lines)
 
-        # 이미지는 첫 번째 배치에만 포함 (토큰 절약)
         user_content = []
         if image_data and batch_idx == 0:
             user_content.append({
@@ -399,31 +387,24 @@ def generate_reviews_with_claude(client, product_info, selling_points, review_co
         raw_text = response.content[0].text.strip()
         batch_reviews = parse_generated_reviews(raw_text)
 
-        # 번호가 잘못 파싱된 경우 보정 (글로벌 번호 기준으로 재배정)
         if batch_reviews:
             all_reviews.extend(batch_reviews)
 
-        # 진행률 콜백
         if progress_callback:
             progress_callback(batch_idx + 1, len(batches), len(all_reviews))
 
-    return all_reviews  # [(num, content), ...] 리스트 직접 반환
+    return all_reviews
 
 # =====================================================
 # 리뷰 텍스트 파싱 (AI 생성 결과용 - 숫자. 형식)
 # =====================================================
 def parse_generated_reviews(text):
-    """
-    AI가 생성한 리뷰 텍스트를 파싱.
-    '1.' 또는 '1' 단독 줄로 구분.
-    """
     lines = text.split('\n')
     reviews = []
     current_num = None
     current_lines = []
 
     for line in lines:
-        # 번호 라인 감지: "1." "1" "2." "2" 등 (단독 줄)
         stripped = line.strip()
         num_match = re.match(r'^(\d+)[.\)]?\s*$', stripped)
         if num_match:
@@ -437,7 +418,6 @@ def parse_generated_reviews(text):
             if current_num is not None:
                 current_lines.append(line)
 
-    # 마지막 리뷰 저장
     if current_num is not None and current_lines:
         content = '\n'.join(current_lines).strip()
         if content:
@@ -456,7 +436,7 @@ with st.sidebar:
     st.markdown("---")
     menu = st.radio("", options=[
         "🏭 버즈필터 발주",
-        "✍️ 리뷰 생성",       # ← 신규 추가 (순서 앞으로)
+        "✍️ 리뷰 생성",
         "📝 리뷰 입력",
         "📄 견적서 생성",
         "🌐 홈페이지 자동 개선"
@@ -494,13 +474,38 @@ if menu == "🏭 버즈필터 발주":
                     qty = extract_qty_from_text(raw)
                     price = int(row.get('가격', 0))
                     ch = str(row.get('판매처', '쿠팡'))
-                    prompt = f"""너는 상품 매칭 전문가야.\n발주서 상품명: {raw}\n상품 리스트:\n{calc_df[['브랜드','제품명','상품코드 표']].to_string(index=False)}\n반드시 아래 형식으로만 답해줘:\n상품코드: [코드값]\n브랜드: [브랜드값]\n못 찾겠으면:\n상품코드: 미등록\n브랜드: 미등록"""
+
+                    # ✅ 버그 수정: 마크다운 금지 + 유사 매칭 강화
+                    prompt = f"""너는 상품 매칭 전문가야.
+발주서 상품명: {raw}
+상품 리스트:
+{calc_df[['브랜드','제품명','상품코드 표']].to_string(index=False)}
+
+규칙:
+1. 브랜드명이나 핵심 키워드가 겹치면 매칭해라 (정확히 일치 안해도 됨)
+2. 예: "다이슨 공기청정기 시리즈" → 다이슨 관련 상품 중 가장 유사한 것 1개
+3. 예: "위닉스 뽀송" → 위닉스 뽀송 관련 상품 1개
+4. 가장 유사한 것 1개만 선택해라
+5. 마크다운 절대 사용 금지. 코드값에 **, *, _ 같은 기호 절대 붙이지 마라
+6. 정말 모르겠으면 미등록
+
+반드시 아래 형식으로만 답해줘:
+상품코드: [코드값]
+브랜드: [브랜드값]
+못 찾겠으면:
+상품코드: 미등록
+브랜드: 미등록"""
+
                     resp = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=100, messages=[{"role":"user","content":prompt}])
                     rt = resp.content[0].text.strip()
                     mc, mb = "미등록", "미등록"
                     for line in rt.split('\n'):
-                        if '상품코드:' in line: mc = line.split('상품코드:')[1].strip()
-                        if '브랜드:' in line: mb = line.split('브랜드:')[1].strip()
+                        # ✅ 버그 수정: ** 등 마크다운 기호 제거
+                        if '상품코드:' in line:
+                            mc = line.split('상품코드:')[1].strip().replace('**', '').replace('*', '').replace('_', '').strip()
+                        if '브랜드:' in line:
+                            mb = line.split('브랜드:')[1].strip().replace('**', '').replace('*', '').replace('_', '').strip()
+
                     match_results.append({'상품명': raw, '매칭 브랜드': mb, '매칭 코드': mc, '판매처': ch, '가격': price, '수량(파싱)': qty})
                     rows_to_add.append([f"{today.year}년", f"{today.month}월", f"{today.day}일", mb, mc, ch, price, qty])
                 st.session_state['rows_to_add'] = rows_to_add
@@ -542,13 +547,11 @@ elif menu == "✍️ 리뷰 생성":
     st.title("✍️ AI 리뷰 자동 생성기")
     st.subheader("제품 정보를 입력하면 자연스럽고 다양한 리뷰를 생성해드립니다.")
 
-    # session_state 초기화
     if 'generated_reviews' not in st.session_state:
-        st.session_state.generated_reviews = []   # [(num, content), ...]
+        st.session_state.generated_reviews = []
     if 'review_edit_mode' not in st.session_state:
         st.session_state.review_edit_mode = False
 
-    # ─── 입력 영역 ───────────────────────────────
     st.markdown("### 📦 STEP 1 — 제품 정보 입력")
 
     col_left, col_right = st.columns([2, 1])
@@ -581,7 +584,6 @@ elif menu == "✍️ 리뷰 생성":
 
     st.markdown("---")
 
-    # ─── 생성 버튼 ───────────────────────────────
     total_batches = max(1, (review_count + 19) // 20)
     st.caption(f"💡 {review_count}개 요청 시 20개씩 {total_batches}번 나눠 생성됩니다.")
 
@@ -592,7 +594,6 @@ elif menu == "✍️ 리뷰 생성":
             try:
                 ai_client = get_anthropic_client()
 
-                # 이미지 데이터 준비
                 image_data = None
                 if product_image:
                     product_image.seek(0)
@@ -605,7 +606,6 @@ elif menu == "✍️ 리뷰 생성":
                         "data": img_b64
                     }
 
-                # 진행률 표시 UI
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
@@ -636,7 +636,6 @@ elif menu == "✍️ 리뷰 생성":
             except Exception as e:
                 st.error(f"❌ 생성 실패: {e}")
 
-    # ─── 결과 표시 + 수정 영역 ───────────────────
     if st.session_state.review_edit_mode and st.session_state.generated_reviews:
         st.markdown("---")
         st.markdown(f"### 📋 STEP 3 — 결과 확인 및 수정 ({len(st.session_state.generated_reviews)}개)")
@@ -644,7 +643,7 @@ elif menu == "✍️ 리뷰 생성":
 
         updated_reviews = []
         for i, (num, content) in enumerate(st.session_state.generated_reviews):
-            with st.expander(f"리뷰 {num}번", expanded=(i < 3)):  # 처음 3개만 펼쳐서 표시
+            with st.expander(f"리뷰 {num}번", expanded=(i < 3)):
                 edited = st.text_area(
                     f"리뷰 {num} 내용",
                     value=content,
@@ -660,7 +659,6 @@ elif menu == "✍️ 리뷰 생성":
         col_save, col_reset = st.columns([3, 1])
         with col_save:
             if st.button("⬇️ 저장 및 엑셀 다운로드", type="primary", use_container_width=True):
-                # 수정된 내용 반영
                 st.session_state.generated_reviews = updated_reviews
                 excel_data = create_excel(updated_reviews)
                 fname = f"리뷰_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
@@ -680,7 +678,6 @@ elif menu == "✍️ 리뷰 생성":
                 st.session_state.review_edit_mode = False
                 st.rerun()
 
-        # 텍스트 전체 미리보기 (복사용)
         with st.expander("📄 텍스트 전체 보기 (복사용)"):
             full_text = ""
             for num, content in st.session_state.generated_reviews:
