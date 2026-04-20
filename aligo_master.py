@@ -45,17 +45,17 @@ def find_last_data_row(sheet):
             last_row = i + 1
     return last_row + 1
 
+# ✅ BUG FIX 1: 8N번 개별 API 호출 → batch_update 1번으로 교체 (429 오류 해결)
 def insert_row_safe(sheet, start_row, rows_data):
+    if not rows_data:
+        return
+    col_map = [('B', 0), ('C', 1), ('D', 2), ('E', 3), ('F', 4), ('H', 5), ('I', 6), ('K', 7)]
+    updates = []
     for i, row in enumerate(rows_data):
         r = start_row + i
-        sheet.update(f"B{r}", [[row[0]]], value_input_option='USER_ENTERED')
-        sheet.update(f"C{r}", [[row[1]]], value_input_option='USER_ENTERED')
-        sheet.update(f"D{r}", [[row[2]]], value_input_option='USER_ENTERED')
-        sheet.update(f"E{r}", [[row[3]]], value_input_option='USER_ENTERED')
-        sheet.update(f"F{r}", [[row[4]]], value_input_option='USER_ENTERED')
-        sheet.update(f"H{r}", [[row[5]]], value_input_option='USER_ENTERED')
-        sheet.update(f"I{r}", [[row[6]]], value_input_option='USER_ENTERED')
-        sheet.update(f"K{r}", [[row[7]]], value_input_option='USER_ENTERED')
+        for col, idx in col_map:
+            updates.append({'range': f'{col}{r}', 'values': [[row[idx]]]})
+    sheet.batch_update(updates, value_input_option='USER_ENTERED')
 
 def extract_qty_from_text(text):
     match = re.search(r'/\s*(\d+)\s*(세트|개)', str(text))
@@ -226,9 +226,6 @@ def deploy_to_netlify(html_content, site_id, token, extra_files=None):
     except Exception as e:
         return False, str(e)
 
-# =====================================================
-# 리뷰 파싱 (기존 유지)
-# =====================================================
 def parse_reviews(text):
     delim = re.compile(r'^\s*(?:\((\d+)\)|(\d+)[.\)]|(\d+))\s*$', re.MULTILINE)
     markers = [(int(m.group(1) or m.group(2) or m.group(3)), m.start(), m.end()) for m in delim.finditer(text)]
@@ -240,9 +237,6 @@ def parse_reviews(text):
         if content: reviews.append((num, content))
     return sorted(reviews, key=lambda x: x[0])
 
-# =====================================================
-# 엑셀 생성 (기존 유지 + 리뷰 생성기에서도 재사용)
-# =====================================================
 def create_excel(reviews):
     wb = Workbook(); ws = wb.active; ws.title = "리뷰"
     hf = PatternFill("solid", start_color="FF6B35", end_color="FF6B35")
@@ -267,15 +261,7 @@ def create_excel(reviews):
         ws.row_dimensions[i].height=max(40,min(content.count('\n')*18+18,200))
     out=io.BytesIO(); wb.save(out); out.seek(0); return out
 
-# =====================================================
-# [신규] 리뷰 AI 생성 함수 - 배치 분할 방식
-# =====================================================
-
 def analyze_images_with_claude(client, image_data_list):
-    """
-    ✅ 방법2: 이미지를 먼저 분석해서 텍스트 설명 추출
-    → 이후 모든 배치에 이 텍스트를 포함시켜 이미지 없이도 동일한 품질 유지
-    """
     if not image_data_list:
         return ""
 
@@ -315,7 +301,6 @@ def generate_reviews_with_claude(client, product_info, selling_points, review_co
 
     BATCH_SIZE = 20
 
-    # ✅ 방법2: 배치 시작 전에 이미지 분석 먼저 수행
     image_description = ""
     if image_data_list:
         image_description = analyze_images_with_claude(client, image_data_list)
@@ -372,7 +357,6 @@ def generate_reviews_with_claude(client, product_info, selling_points, review_co
                 prev_lines.append(f"- {num}번: {first_line}...")
             prev_summary = "\n[이미 작성된 리뷰 도입부 (절대 유사하게 쓰지 말 것)]\n" + "\n".join(prev_lines)
 
-        # ✅ 방법2: 이미지 없이 텍스트 설명만 프롬프트에 포함 (모든 배치 동일 품질)
         image_section = ""
         if image_description:
             image_section = f"""
@@ -438,9 +422,6 @@ def generate_reviews_with_claude(client, product_info, selling_points, review_co
 
     return all_reviews
 
-# =====================================================
-# 리뷰 텍스트 파싱 (AI 생성 결과용 - 숫자. 형식)
-# =====================================================
 def parse_generated_reviews(text):
     lines = text.split('\n')
     reviews = []
@@ -469,9 +450,30 @@ def parse_generated_reviews(text):
     return sorted(reviews, key=lambda x: x[0])
 
 
-# =====================================================
-# Streamlit 앱 시작
-# =====================================================
+# ✅ BUG FIX 2: AI 상품 매칭용 헬퍼 — 응답에서 코드/브랜드 추출 (robust parsing)
+def parse_match_response(text):
+    mc, mb = "미등록", "미등록"
+    for line in text.split('\n'):
+        line = line.strip()
+        # 상품코드 파싱: "상품코드:" 또는 "상품코드 표:" 둘 다 처리
+        if re.search(r'상품코드\s*(?:표)?\s*:', line):
+            val = re.split(r'상품코드\s*(?:표)?\s*:', line, maxsplit=1)[1]
+            val = re.sub(r'[*_`]', '', val).strip()
+            if val and val != '미등록':
+                mc = val
+            elif val == '미등록':
+                mc = '미등록'
+        # 브랜드 파싱
+        if re.search(r'브랜드\s*:', line):
+            val = re.split(r'브랜드\s*:', line, maxsplit=1)[1]
+            val = re.sub(r'[*_`]', '', val).strip()
+            if val and val != '미등록':
+                mb = val
+            elif val == '미등록':
+                mb = '미등록'
+    return mc, mb
+
+
 st.set_page_config(page_title="버즈필터 자동화", page_icon="🤖", layout="wide")
 
 with st.sidebar:
@@ -488,9 +490,6 @@ with st.sidebar:
     st.caption("버즈필터 업무 자동화 시스템")
     st.caption("© 2025 알리고미디어")
 
-# =====================================================
-# 페이지 1: 버즈필터 발주
-# =====================================================
 if menu == "🏭 버즈필터 발주":
     st.title("🤖 버즈필터 발주 자동 장부 입력")
     st.subheader("📊 발주서 엑셀을 업로드하면 장부에 자동으로 입력합니다.")
@@ -509,20 +508,27 @@ if menu == "🏭 버즈필터 발주":
                 calc_df = pd.DataFrame(amd[2:], columns=amd[1])
                 calc_df = calc_df[calc_df['제품명'].str.strip() != '']
                 st.success(f"✅ 마진계산기 로드 완료 ({len(calc_df)}개 상품)")
+
             with st.spinner("AI가 상품 매칭 중..."):
                 today = datetime.now()
                 rows_to_add, match_results = [], []
+
+                # ✅ BUG FIX 2: 컬럼명 정규화 — '상품코드 표' → '상품코드'로 통일해서 AI 혼동 방지
+                product_col = '상품코드 표' if '상품코드 표' in calc_df.columns else '상품코드'
+                display_df = calc_df[['브랜드', '제품명', product_col]].copy()
+                display_df = display_df.rename(columns={product_col: '상품코드'})
+
                 for idx, row in df.iterrows():
                     raw = str(row.get('상품명+옵션+개수', ''))
                     qty = extract_qty_from_text(raw)
                     price = int(row.get('가격', 0))
                     ch = str(row.get('판매처', '쿠팡'))
 
-                    # ✅ 버그 수정: 마크다운 금지 + 유사 매칭 강화
                     prompt = f"""너는 상품 매칭 전문가야.
 발주서 상품명: {raw}
-상품 리스트:
-{calc_df[['브랜드','제품명','상품코드 표']].to_string(index=False)}
+
+상품 리스트 (브랜드 / 제품명 / 상품코드):
+{display_df.to_string(index=False)}
 
 규칙:
 1. 브랜드명이나 핵심 키워드가 겹치면 매칭해라 (정확히 일치 안해도 됨)
@@ -532,25 +538,25 @@ if menu == "🏭 버즈필터 발주":
 5. 마크다운 절대 사용 금지. 코드값에 **, *, _ 같은 기호 절대 붙이지 마라
 6. 정말 모르겠으면 미등록
 
-반드시 아래 형식으로만 답해줘:
-상품코드: [코드값]
-브랜드: [브랜드값]
+반드시 아래 형식으로만 답해줘 (다른 말 없이):
+상품코드: [상품 리스트의 상품코드 값]
+브랜드: [상품 리스트의 브랜드 값]
 못 찾겠으면:
 상품코드: 미등록
 브랜드: 미등록"""
 
-                    resp = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=100, messages=[{"role":"user","content":prompt}])
+                    resp = client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=150,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
                     rt = resp.content[0].text.strip()
-                    mc, mb = "미등록", "미등록"
-                    for line in rt.split('\n'):
-                        # ✅ 버그 수정: ** 등 마크다운 기호 제거
-                        if '상품코드:' in line:
-                            mc = line.split('상품코드:')[1].strip().replace('**', '').replace('*', '').replace('_', '').strip()
-                        if '브랜드:' in line:
-                            mb = line.split('브랜드:')[1].strip().replace('**', '').replace('*', '').replace('_', '').strip()
+                    # ✅ BUG FIX 2: robust 파싱 함수 사용
+                    mc, mb = parse_match_response(rt)
 
                     match_results.append({'상품명': raw, '매칭 브랜드': mb, '매칭 코드': mc, '판매처': ch, '가격': price, '수량(파싱)': qty})
                     rows_to_add.append([f"{today.year}년", f"{today.month}월", f"{today.day}일", mb, mc, ch, price, qty])
+
                 st.session_state['rows_to_add'] = rows_to_add
                 st.session_state['match_results'] = match_results
                 st.session_state['ready_to_insert'] = True
@@ -583,9 +589,6 @@ if menu == "🏭 버즈필터 발주":
                     except Exception as e:
                         st.error(f"❌ 입력 실패: {e}")
 
-# =====================================================
-# 페이지 2: 리뷰 생성 (신규)
-# =====================================================
 elif menu == "✍️ 리뷰 생성":
     st.title("✍️ AI 리뷰 자동 생성기")
     st.subheader("제품 정보를 입력하면 자연스럽고 다양한 리뷰를 생성해드립니다.")
@@ -639,7 +642,6 @@ elif menu == "✍️ 리뷰 생성":
             try:
                 ai_client = get_anthropic_client()
 
-                # ✅ 수정: 여러 장 이미지 리스트로 변환
                 image_data_list = []
                 media_type_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
                 if product_images:
@@ -733,9 +735,6 @@ elif menu == "✍️ 리뷰 생성":
                 full_text += f"{num}.\n{content}\n\n"
             st.text_area("전체 리뷰 텍스트", value=full_text.strip(), height=400, label_visibility="collapsed")
 
-# =====================================================
-# 페이지 3: 리뷰 입력 (기존 유지)
-# =====================================================
 elif menu == "📝 리뷰 입력":
     st.title("📝 리뷰 엑셀 자동 변환기")
     st.subheader("리뷰 텍스트 파일을 업로드하면 엑셀 파일로 자동 변환합니다.")
@@ -769,9 +768,6 @@ elif menu == "📝 리뷰 입력":
             else:
                 st.error("❌ 리뷰를 파싱할 수 없습니다.")
 
-# =====================================================
-# 페이지 4: 견적서 생성 (기존 유지)
-# =====================================================
 elif menu == "📄 견적서 생성":
     st.title("📄 견적서 자동 생성")
     st.subheader("정보를 입력하면 PDF 견적서를 자동으로 만들어드립니다.")
@@ -837,9 +833,6 @@ elif menu == "📄 견적서 생성":
                     st.error(f"❌ PDF 생성 실패: {e}")
                     st.info("💡 NotoSansKR-Regular.ttf, NotoSansKR-Bold.ttf 파일이 같은 폴더에 있는지 확인해주세요!")
 
-# =====================================================
-# 페이지 5: 홈페이지 자동 개선 (기존 유지)
-# =====================================================
 elif menu == "🌐 홈페이지 자동 개선":
     st.title("🌐 홈페이지 자동 개선 + 자동 배포")
     st.subheader("HTML과 이미지를 업로드하면 Claude가 수정하고 Netlify에 자동 배포합니다.")
