@@ -837,6 +837,75 @@ def generate_strategy_analysis(jasaeng_strategies, jasaeng_order, jasaeng_totals
     return texts
 
 
+def generate_ai_report_text(client, jasaeng_totals, jasaeng_order, jasaeng_grand_total,
+                             jasaeng_strategies, hospital_counts, hamsoa_count,
+                             competitor_records, report_date):
+    """Claude API로 전문 분석가 어조의 보고서 텍스트 생성"""
+
+    # 자생 전략 요약
+    strat_lines = []
+    for s in jasaeng_order:
+        t = jasaeng_totals.get(s, 0)
+        items = jasaeng_strategies.get(s, [])
+        top_keywords = ", ".join(f"{kw}({cnt}건)" for kw, cnt in sorted(items, key=lambda x: x[1], reverse=True)[:5])
+        strat_lines.append(f"  - {s}: {t}건" + (f" (주요: {top_keywords})" if top_keywords else ""))
+
+    # 경쟁사 전략유형 집계
+    hosp_strategies = {}
+    for rec in competitor_records:
+        h = _get_field(rec, ['병원', '경쟝사', 'hospital', '병 원'])
+        s = _get_field(rec, ['전략유형', '전략 유형', 'strategy', '유형'])
+        if h and s:
+            hosp_strategies.setdefault(h, {})
+            hosp_strategies[h][s] = hosp_strategies[h].get(s, 0) + 1
+
+    hosp_lines = []
+    for h, c in sorted(hospital_counts.items(), key=lambda x: x[1], reverse=True):
+        strat = hosp_strategies.get(h, {})
+        strat_str = ", ".join(f"{s} {n}건" for s, n in sorted(strat.items(), key=lambda x: x[1], reverse=True)) if strat else "전략유형 미분류"
+        hosp_lines.append(f"  - {h}: {c}건 ({strat_str})")
+    hosp_lines.append(f"  - 함소아한의원: {hamsoa_count}건")
+
+    prompt = f"""당신은 의료 PR·미디어 전략 분석 전문가입니다.
+아래 데이터를 바탕으로 경쟁사 언론보도 동향 분석 보고서 텍스트를 작성해주세요.
+
+[분석 기준일]
+{report_date}
+
+[자생한방병원 전략유형별 기사 현황] (총 {jasaeng_grand_total}건)
+{chr(10).join(strat_lines)}
+
+[경쟁사 및 함소아한의원 기사 발행 현황]
+{chr(10).join(hosp_lines)}
+
+[작성 요청]
+아래 두 섹션을 각각 불릿 3개씩 작성해주세요.
+
+**섹션1: 병원별 언론보도 발행 수량 비교 분석**
+- 자생한방병원이 압도적 1위임을 전문적으로 표현
+- 다른 병원들과의 순위/수량 비교 (함소아 포함)
+- 자생 대비 함소아 발행 비율·격차를 수치로 분석
+
+**섹션2: 자생한방병원 전략유형별 세부 분석 + 경쟝사 비교**
+- 자생한방병원 전략유형 구성 비율과 특징 분석 (어떤 전략이 주력인지, 왜 그런지)
+- 해아림·아이누리 등 활성 경쟝사 전략 특징 분석
+- 발행 저조 병원에 대한 시사점
+
+[작성 조건]
+- 전문 분석가 어조, 객관적·날카로운 시각
+- 각 불릿은 2~3문장 이내
+- 불릿은 반드시 "➡ " 로 시작
+- 섹션 구분은 "=== 섹션1 ===" "=== 섹션2 ===" 형식으로 표시
+- 한국어로 작성"""
+
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=2000,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return message.content[0].text
+
+
 def generate_hamsoa_ppt(competitor_records, meta, hamsoa_articles, billing_data,
                          report_date, report_month, hamsoa_article_count):
     from pptx import Presentation
@@ -1691,20 +1760,53 @@ elif menu == "📊 함소아 보고서":
                         st.caption(" / ".join(f"{kw}({cnt})" for kw, cnt in items))
             st.markdown(f"**총 합계: {jasaeng_grand_total}건**")
 
-        # ── 분석 텍스트 1: 발행 수량 비교 ──
-        st.markdown("### 📝 분석 텍스트 1 — 발행 수량 비교")
-        qty_texts = generate_quantity_analysis(
-            hospital_counts, hamsoa_count, jasaeng_grand_total, report_date)
-        qty_output = "\n\n".join(f"➡  {t}" for t in qty_texts)
-        st.text_area("복사해서 PPT에 붙여넣으세요", value=qty_output, height=200, key="qty_out")
+        # ── AI 분석 텍스트 생성 ──
+        st.markdown("---")
+        st.markdown("### 🤖 AI 전문가 분석 텍스트")
+        st.caption("데이터를 바탕으로 AI가 전문 분석가 어조로 작성합니다.")
 
-        # ── 분석 텍스트 2: 전략유형별 세부 분석 ──
-        st.markdown("### 📝 분석 텍스트 2 — 전략유형별 세부 분석")
-        strat_texts = generate_strategy_analysis(
-            jasaeng_strategies, jasaeng_order, jasaeng_totals, jasaeng_grand_total,
-            competitor_records, hospital_counts)
-        strat_output = "\n\n".join(f"➡  {t}" for t in strat_texts)
-        st.text_area("복사해서 PPT에 붙여넣으세요", value=strat_output, height=280, key="strat_out")
+        if st.button("✨ AI로 분석 텍스트 생성", type="primary", use_container_width=True):
+            with st.spinner("AI가 분석 중... (5~10초)"):
+                try:
+                    ai_client = get_anthropic_client()
+                    ai_text = generate_ai_report_text(
+                        ai_client,
+                        jasaeng_totals, jasaeng_order, jasaeng_grand_total,
+                        jasaeng_strategies, hospital_counts, hamsoa_count,
+                        competitor_records, report_date
+                    )
+                    st.session_state["ai_report_text"] = ai_text
+                except Exception as e:
+                    st.error(f"AI 생성 실패: {e}")
+
+        if st.session_state.get("ai_report_text"):
+            raw = st.session_state["ai_report_text"]
+            # 섹션1, 섹션2 분리 표시
+            if "섹션1" in raw or "섹션2" in raw:
+                parts = re.split(r'={2,}\s*섹션[12]\s*={2,}', raw)
+                labels = ["섹션1: 발행 수량 비교", "섹션2: 전략유형별 세부 분석"]
+                sections = [p.strip() for p in parts if p.strip()]
+                for i, sec in enumerate(sections):
+                    label = labels[i] if i < len(labels) else f"섹션{i+1}"
+                    st.markdown(f"**📝 {label}**")
+                    st.text_area("복사해서 PPT에 붙여넣으세요", value=sec, height=220, key=f"ai_sec_{i}")
+            else:
+                st.text_area("복사해서 PPT에 붙여넣으세요", value=raw, height=420, key="ai_full")
+
+        st.markdown("---")
+
+        # ── 기본 템플릿 텍스트 (참고용) ──
+        with st.expander("📋 기본 템플릿 텍스트 (참고용)", expanded=False):
+            qty_texts = generate_quantity_analysis(
+                hospital_counts, hamsoa_count, jasaeng_grand_total, report_date)
+            qty_output = "\n\n".join(f"➡  {t}" for t in qty_texts)
+            st.text_area("수량 비교", value=qty_output, height=180, key="qty_out")
+
+            strat_texts = generate_strategy_analysis(
+                jasaeng_strategies, jasaeng_order, jasaeng_totals, jasaeng_grand_total,
+                competitor_records, hospital_counts)
+            strat_output = "\n\n".join(f"➡  {t}" for t in strat_texts)
+            st.text_area("전략유형 분석", value=strat_output, height=200, key="strat_out")
 
         # ── 데이터 미리보기 ──
         with st.expander("📋 경쟁사 기사 미리보기", expanded=False):
