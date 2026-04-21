@@ -698,6 +698,147 @@ def _style_cell(cell, text, bg_hex=None, fg_hex=None, font_size=8,
     if bg_hex:
         _set_cell_bg(cell, bg_hex)
 
+def parse_jasaeng_strategy(raw_text):
+    """자생한방병원 전략 데이터 파싱
+    형식:
+        질환 타겟형
+        비염 1
+        일자목 1
+        시술 중심형
+        ...
+    반환: strategies dict, order list, totals dict, grand_total int
+    """
+    strategies = {}
+    strategy_order = []
+    current_strategy = None
+
+    for line in raw_text.strip().split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.rsplit(None, 1)
+        if len(parts) == 2:
+            try:
+                count = int(parts[1])
+                if current_strategy is not None:
+                    strategies[current_strategy].append((parts[0].strip(), count))
+                continue
+            except ValueError:
+                pass
+        # 전략유형 헤더
+        current_strategy = line
+        if current_strategy not in strategies:
+            strategies[current_strategy] = []
+            strategy_order.append(current_strategy)
+
+    totals = {s: sum(c for _, c in items) for s, items in strategies.items()}
+    grand_total = sum(totals.values())
+    return strategies, strategy_order, totals, grand_total
+
+
+def generate_quantity_analysis(hospital_counts, hamsoa_count, jasaeng_total, report_date):
+    """병원별 발행 수량 비교 분석 텍스트 생성 (이미지 1 형식)
+    반환: list of str (각 불릿 텍스트)
+    """
+    others = {h: c for h, c in hospital_counts.items()
+              if '자생' not in h and '함소아' not in h}
+    combined = list(others.items())
+    combined.append(('함소아한의원', hamsoa_count))
+    combined = sorted(combined, key=lambda x: x[1], reverse=True)
+
+    positive = [(h, c) for h, c in combined if c > 0]
+    zero_hosps = [h for h, c in combined if c == 0]
+
+    texts = []
+
+    # 불릿 1: 자생 1위
+    texts.append(
+        f"{report_date} 기준, 자생한방병원은 총 {jasaeng_total}건의 보도자료를 언론에 배포하며, "
+        f"전체 병원 중 가장 많은 기사 발행 수를 기록했습니다."
+    )
+
+    # 불릿 2: 나머지 병원들 순서대로
+    if positive:
+        first_h, first_c = positive[0]
+        parts2 = [f"{first_h}은 총 {first_c}건을 발행하며 그 뒤를 이었고"]
+        for h, c in positive[1:]:
+            parts2.append(f"{h}이 총 {c}건 발행 하였으며")
+        t2 = ", ".join(parts2)
+        if zero_hosps:
+            t2 += f", {', '.join(zero_hosps)}은 발행 수량이 0건으로 나타났습니다."
+        else:
+            t2 += "."
+        texts.append(t2)
+
+    # 불릿 3: 자생 vs 함소아 비율
+    if jasaeng_total > 0 and hamsoa_count > 0:
+        ratio = round(hamsoa_count / jasaeng_total * 100, 1)
+        times = round(jasaeng_total / hamsoa_count)
+        texts.append(
+            f"자생한방병원은 총 {jasaeng_total}건, 함소아한의원은 {hamsoa_count}건의 언론보도를 발행하였으며, "
+            f"함소아한의원의 발행 수는 자생한방병원의 약 {ratio}% 수준으로, "
+            f"양 기관 간 보도자료 운영 규모에서 {times}배 이상의 격차를 보였습니다."
+        )
+
+    return texts
+
+
+def generate_strategy_analysis(jasaeng_strategies, jasaeng_order, jasaeng_totals, jasaeng_grand_total,
+                                competitor_records, hospital_counts):
+    """전략유형별 세부 분석 텍스트 생성 (이미지 2 형식)
+    반환: list of str (각 불릿 텍스트)
+    """
+    texts = []
+
+    # 자생한방병원 전략 breakdown
+    strat_parts = []
+    for s in jasaeng_order:
+        t = jasaeng_totals.get(s, 0)
+        strat_parts.append(f"'{s}'이 {t}건")
+    jasaeng_strat_str = ", ".join(strat_parts)
+
+    texts.append(
+        f"총 {jasaeng_grand_total}건의 자생한방병원 기사 중, {jasaeng_strat_str}으로 확인되며, "
+        f"질환 관련 정보성 기사와 브랜드 이미지 제고를 중심으로 전략적 콘텐츠 배포를 함께 다뤄진 것으로 분석됩니다. "
+        f"특히 이슈가 발생한 키워드를 중점으로 칼럼 기사를 배포하여 최대한 많은 사람들에게 기사를 "
+        f"노출시킬 수 있도록 집중한 것으로 확인됩니다."
+    )
+
+    # 경쟁사 스프레드시트 병원별 전략유형 집계
+    hosp_strategies = {}
+    for rec in competitor_records:
+        h = _get_field(rec, ['병원', '경쟁사', 'hospital', '병 원'])
+        s = _get_field(rec, ['전략유형', '전략 유형', 'strategy', '유형'])
+        if h and s:
+            hosp_strategies.setdefault(h, {})
+            hosp_strategies[h][s] = hosp_strategies[h].get(s, 0) + 1
+
+    sorted_hosps = sorted(hospital_counts.items(), key=lambda x: x[1], reverse=True)
+    active = [(h, c) for h, c in sorted_hosps if c > 0 and '자생' not in h]
+    inactive = [h for h, c in sorted_hosps if c == 0 and '자생' not in h]
+
+    for h, c in active:
+        strat = hosp_strategies.get(h, {})
+        if strat:
+            sorted_strat = sorted(strat.items(), key=lambda x: x[1], reverse=True)
+            strat_desc = ", ".join(f"{s}이 {n}건" for s, n in sorted_strat)
+            main_s = sorted_strat[0][0]
+            texts.append(
+                f"{h}은 총 {c}건의 기사 중 {strat_desc}으로 구성되어, "
+                f"'{main_s}' 전략을 중심으로 운영한 것으로 분석됩니다."
+            )
+        else:
+            texts.append(f"{h}은 총 {c}건의 기사를 발행하였습니다.")
+
+    if inactive:
+        inactive_str = ", ".join(inactive)
+        texts.append(
+            f"반면, {inactive_str}은 집계된 기사가 없는 상태로, 언론 노출 자체가 미비합니다."
+        )
+
+    return texts
+
+
 def generate_hamsoa_ppt(competitor_records, meta, hamsoa_articles, billing_data,
                          report_date, report_month, hamsoa_article_count):
     from pptx import Presentation
@@ -1446,92 +1587,123 @@ elif menu == "🌐 홈페이지 자동 개선":
             st.rerun()
 
 elif menu == "📊 함소아 보고서":
-    st.title("📊 함소아한의원 보고서 자동 생성")
-    st.subheader("스프레드시트 데이터를 읽어 PPT 보고서를 자동으로 생성합니다.")
+    st.title("📊 함소아한의원 보고서 분석 텍스트 생성")
 
-    st.info("💡 스프레드시트 탭 이름이 다르면 아래에서 직접 수정하세요.")
-
+    # ── STEP 1: 기본 설정 ──
+    st.markdown("### STEP 1. 기본 설정")
     col1, col2 = st.columns(2)
     with col1:
         report_date = st.text_input("보고서 기준일",
                                     value=datetime.now().strftime("%Y년 %m월 %d일"),
-                                    placeholder="예) 2026년 4월 21일")
+                                    placeholder="예) 2026년 3월 20일")
         comp_sheet_name = st.text_input("경쟁사 시트 탭 이름", value="경쟁사 동향 분석 시트")
     with col2:
         report_month = st.text_input("보고 월",
                                      value=datetime.now().strftime("%Y년 %m월"),
-                                     placeholder="예) 2026년 4월")
+                                     placeholder="예) 2026년 3월")
         mgmt_sheet_name = st.text_input("함소아 관리 시트 탭 이름", value="함소아 한의원 관리 시트")
 
     hamsoa_manual = st.number_input(
-        "함소아 기사 발행 건수 (0이면 자동 계산)",
-        min_value=0, value=0,
-        help="0으로 두면 진행현황='완료'인 기사 수로 자동 계산됩니다.")
+        "함소아 기사 발행 건수 (0이면 시트에서 자동 계산)",
+        min_value=0, value=0)
 
     st.markdown("---")
 
-    if st.button("📊 데이터 불러오기 + 보고서 생성", type="primary", use_container_width=True):
+    # ── STEP 2: 자생한방병원 전략 데이터 입력 ──
+    st.markdown("### STEP 2. 자생한방병원 전략 데이터 입력")
+    st.caption("전략유형 이름을 먼저 쓰고, 그 아래에 '키워드 건수' 형식으로 입력. 건수 없는 줄은 유형 헤더로 처리됩니다.")
+
+    jasaeng_raw = st.text_area(
+        "자생한방병원 전략 데이터",
+        height=300,
+        placeholder="""질환 타겟형
+비염 1
+일자목 1
+혈당스파이크 24
+
+시술 중심형
+
+마케팅형
+척추건강 증진사업 21
+공동모금회 백미 29
+
+브랜드 강화형
+동작침법 52
+발목 염좌 18""",
+        help="숫자가 있는 줄 = 항목, 숫자 없는 줄 = 전략유형 헤더"
+    )
+
+    st.markdown("---")
+
+    # ── STEP 3: 생성 버튼 ──
+    if st.button("✨ 분석 텍스트 생성", type="primary", use_container_width=True):
+
+        if not jasaeng_raw.strip():
+            st.error("자생한방병원 전략 데이터를 입력해주세요.")
+            st.stop()
+
+        jasaeng_strategies, jasaeng_order, jasaeng_totals, jasaeng_grand_total = \
+            parse_jasaeng_strategy(jasaeng_raw)
+
         with st.spinner("경쟁사 시트 불러오는 중..."):
             comp_sheet = get_hamsoa_sheet(comp_sheet_name)
             if comp_sheet is None:
-                st.error(f"'{comp_sheet_name}' 시트를 찾을 수 없습니다. 탭 이름을 확인해주세요.")
+                st.error(f"'{comp_sheet_name}' 시트를 찾을 수 없습니다.")
                 st.stop()
             competitor_records, meta = parse_competitor_sheet(comp_sheet)
-            st.success(f"✅ 경쟁사 기사 {len(competitor_records)}건 로드 완료")
 
         with st.spinner("함소아 관리 시트 불러오는 중..."):
             mgmt_sheet = get_hamsoa_sheet(mgmt_sheet_name)
             if mgmt_sheet is None:
-                st.error(f"'{mgmt_sheet_name}' 시트를 찾을 수 없습니다. 탭 이름을 확인해주세요.")
+                st.error(f"'{mgmt_sheet_name}' 시트를 찾을 수 없습니다.")
                 st.stop()
             hamsoa_articles, billing_data = parse_hamsoa_sheet(mgmt_sheet)
-            st.success(f"✅ 함소아 기사 {len(hamsoa_articles)}건, 정산 {len(billing_data)}건 로드 완료")
 
         completed = [a for a in hamsoa_articles
                      if '완료' in str(a.get('진행 현황', a.get('진행현황', '')))]
         hamsoa_count = hamsoa_manual if hamsoa_manual > 0 else len(completed)
+        hospital_counts = meta.get('hospital_counts', {})
 
-        with st.expander("📋 경쟁사 데이터 미리보기", expanded=False):
+        st.success(f"✅ 자생 {jasaeng_grand_total}건 | 경쟁사 기사 {len(competitor_records)}건 | 함소아 {hamsoa_count}건 로드 완료")
+
+        # 자생 전략 집계 확인
+        with st.expander("📊 자생한방병원 전략 집계 확인", expanded=True):
+            cols = st.columns(len(jasaeng_order) if jasaeng_order else 1)
+            for i, s in enumerate(jasaeng_order):
+                t = jasaeng_totals.get(s, 0)
+                items = jasaeng_strategies.get(s, [])
+                with cols[i % len(cols)]:
+                    st.metric(s, f"{t}건")
+                    if items:
+                        st.caption(" / ".join(f"{kw}({cnt})" for kw, cnt in items))
+            st.markdown(f"**총 합계: {jasaeng_grand_total}건**")
+
+        # ── 분석 텍스트 1: 발행 수량 비교 ──
+        st.markdown("### 📝 분석 텍스트 1 — 발행 수량 비교")
+        qty_texts = generate_quantity_analysis(
+            hospital_counts, hamsoa_count, jasaeng_grand_total, report_date)
+        qty_output = "\n\n".join(f"➡  {t}" for t in qty_texts)
+        st.text_area("복사해서 PPT에 붙여넣으세요", value=qty_output, height=200, key="qty_out")
+
+        # ── 분석 텍스트 2: 전략유형별 세부 분석 ──
+        st.markdown("### 📝 분석 텍스트 2 — 전략유형별 세부 분석")
+        strat_texts = generate_strategy_analysis(
+            jasaeng_strategies, jasaeng_order, jasaeng_totals, jasaeng_grand_total,
+            competitor_records, hospital_counts)
+        strat_output = "\n\n".join(f"➡  {t}" for t in strat_texts)
+        st.text_area("복사해서 PPT에 붙여넣으세요", value=strat_output, height=280, key="strat_out")
+
+        # ── 데이터 미리보기 ──
+        with st.expander("📋 경쟁사 기사 미리보기", expanded=False):
             if competitor_records:
-                st.dataframe(pd.DataFrame(competitor_records).head(15))
-                hosp_cnt = meta.get('hospital_counts', {})
-                if hosp_cnt:
-                    st.markdown("**병원별 건수:**")
-                    st.write(hosp_cnt)
+                st.dataframe(pd.DataFrame(competitor_records).head(20))
+                if hospital_counts:
+                    st.write("병원별 건수:", hospital_counts)
             else:
-                st.warning("⚠️ 경쟁사 데이터가 없습니다. A열에 번호가 입력되어 있는지 확인해주세요.")
+                st.warning("⚠️ 경쟁사 데이터 없음")
 
         with st.expander("📋 함소아 기사 미리보기", expanded=False):
             if hamsoa_articles:
                 st.dataframe(pd.DataFrame(hamsoa_articles))
             else:
-                st.warning("⚠️ 함소아 기사 데이터가 없습니다.")
-
-        with st.expander("💰 정산 데이터 미리보기", expanded=False):
-            if billing_data:
-                st.dataframe(pd.DataFrame(billing_data))
-            else:
-                st.warning("⚠️ 정산 데이터가 없습니다.")
-
-        with st.spinner("PPT 생성 중... (약 10~20초)"):
-            try:
-                ppt_buf = generate_hamsoa_ppt(
-                    competitor_records, meta,
-                    hamsoa_articles, billing_data,
-                    report_date, report_month, hamsoa_count
-                )
-                st.success("✅ PPT 생성 완료!")
-                st.balloons()
-
-                fname = f"함소아한의원_보고서_{datetime.now().strftime('%Y%m%d')}.pptx"
-                st.download_button(
-                    label="⬇️ PPT 다운로드",
-                    data=ppt_buf,
-                    file_name=fname,
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    use_container_width=True,
-                    type="primary"
-                )
-            except Exception as e:
-                st.error(f"❌ PPT 생성 실패: {e}")
-                st.info("💡 python-pptx와 matplotlib이 설치되어 있는지 확인해주세요. requirements.txt에 추가 후 재배포하세요.")
+                st.warning("⚠️ 함소아 기사 데이터 없음")
