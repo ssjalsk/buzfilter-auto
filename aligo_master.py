@@ -1657,12 +1657,27 @@ elif menu == "📊 함소아 보고서":
                 st.stop()
             hamsoa_articles, billing_data = parse_hamsoa_sheet(mgmt_sheet)
 
-        completed = [a for a in hamsoa_articles
-                     if '완료' in str(a.get('진행 현황', a.get('진행현황', '')))]
-        hamsoa_count = hamsoa_manual if hamsoa_manual > 0 else len(completed)
+        # 함소아 기사 수: 수동 입력 우선, 없으면 시트 전체 행 수
+        if hamsoa_manual > 0:
+            hamsoa_count = hamsoa_manual
+        else:
+            hamsoa_count = len(hamsoa_articles)
         hospital_counts = meta.get('hospital_counts', {})
 
         st.success(f"✅ 자생 {jasaeng_grand_total}건 | 경쟁사 기사 {len(competitor_records)}건 | 함소아 {hamsoa_count}건 로드 완료")
+
+        # 함소아 시트 파싱 결과 디버그
+        if hamsoa_articles:
+            with st.expander(f"📋 함소아 기사 현황 ({hamsoa_count}건) — 컬럼 확인", expanded=False):
+                df_art = pd.DataFrame(hamsoa_articles)
+                st.write("감지된 컬럼:", list(df_art.columns))
+                # 진행현황 컬럼 찾아서 분포 보여주기
+                status_col = next((c for c in df_art.columns if '진행' in c or '현황' in c), None)
+                if status_col:
+                    st.write(f"'{status_col}' 값 분포:", df_art[status_col].value_counts().to_dict())
+                st.dataframe(df_art.head(10))
+        else:
+            st.warning("⚠️ 함소아 기사를 시트에서 읽지 못했습니다. '발행일', '구분', '제목' 컬럼이 있는 헤더 행이 있는지 확인해주세요.")
 
         # 자생 전략 집계 확인
         with st.expander("📊 자생한방병원 전략 집계 확인", expanded=True):
