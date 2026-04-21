@@ -716,16 +716,14 @@ def parse_jasaeng_strategy(raw_text):
         line = line.strip()
         if not line:
             continue
-        parts = line.rsplit(None, 1)
-        if len(parts) == 2:
-            try:
-                count = int(parts[1])
-                if current_strategy is not None:
-                    strategies[current_strategy].append((parts[0].strip(), count))
-                continue
-            except ValueError:
-                pass
-        # 전략유형 헤더
+        # 줄 끝 숫자 추출 (공백 유무 상관없이: "잔기침1" or "비염 1" 모두 처리)
+        m = re.match(r'^(.+?)\s*(\d+)\s*$', line)
+        if m:
+            keyword, count = m.group(1).strip(), int(m.group(2))
+            if current_strategy is not None:
+                strategies[current_strategy].append((keyword, count))
+            continue
+        # 전략유형 헤더 (숫자로 끝나지 않는 줄)
         current_strategy = line
         if current_strategy not in strategies:
             strategies[current_strategy] = []
