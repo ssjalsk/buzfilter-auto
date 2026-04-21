@@ -45,7 +45,6 @@ def find_last_data_row(sheet):
             last_row = i + 1
     return last_row + 1
 
-# ✅ BUG FIX 1: 8N번 개별 API 호출 → batch_update 1번으로 교체 (429 오류 해결)
 def insert_row_safe(sheet, start_row, rows_data):
     if not rows_data:
         return
@@ -264,47 +263,25 @@ def create_excel(reviews):
 def analyze_images_with_claude(client, image_data_list):
     if not image_data_list:
         return ""
-
     content = []
     for img in image_data_list:
-        content.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": img["media_type"],
-                "data": img["data"]
-            }
-        })
-    content.append({
-        "type": "text",
-        "text": """이 제품 이미지들을 분석해서 리뷰 작성에 활용할 수 있도록 아래 항목을 상세하게 설명해줘.
-
+        content.append({"type": "image", "source": {"type": "base64", "media_type": img["media_type"], "data": img["data"]}})
+    content.append({"type": "text", "text": """이 제품 이미지들을 분석해서 리뷰 작성에 활용할 수 있도록 아래 항목을 상세하게 설명해줘.
 1. 제품 외관 및 디자인 (색상, 형태, 크기감, 패키징)
 2. 제품에 표시된 텍스트, 로고, 브랜드명, 성분 등
 3. 제품의 재질감, 질감, 마감 느낌
-4. 이미지에서 보이는 특징적인 요소들 (버튼, 뚜껑, 용량 표시 등)
-5. 전반적인 제품 분위기 (고급스러움, 실용적, 귀여운 등)
-
-리뷰 작가가 실제로 제품을 써본 것처럼 묘사할 수 있도록 구체적으로 써줘. 설명만 출력해."""
-    })
-
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1000,
-        messages=[{"role": "user", "content": content}]
-    )
+4. 이미지에서 보이는 특징적인 요소들
+5. 전반적인 제품 분위기
+리뷰 작가가 실제로 제품을 써본 것처럼 묘사할 수 있도록 구체적으로 써줘. 설명만 출력해."""})
+    response = client.messages.create(model="claude-sonnet-4-6", max_tokens=1000, messages=[{"role": "user", "content": content}])
     return response.content[0].text.strip()
-
 
 def generate_reviews_with_claude(client, product_info, selling_points, review_count, char_count, image_data_list=None, progress_callback=None):
     import random
-
     BATCH_SIZE = 20
-
     image_description = ""
     if image_data_list:
         image_description = analyze_images_with_claude(client, image_data_list)
-
     persona_pool = [
         "20대 초반 여성 대학생", "20대 중반 직장 여성", "20대 후반 직장 여성",
         "20대 초반 남성 대학생", "20대 후반 남성 직장인",
@@ -326,28 +303,19 @@ def generate_reviews_with_claude(client, product_info, selling_points, review_co
         "20대 여성 헤어디자이너", "30대 여성 요가강사", "40대 여성 영양사",
         "50대 여성 교사", "60대 여성 주부", "30대 워킹대디", "40대 워킹대디"
     ]
-
     random.shuffle(persona_pool)
     all_personas = [persona_pool[i % len(persona_pool)] for i in range(review_count)]
-
     all_reviews = []
-
     batches = []
     for start in range(0, review_count, BATCH_SIZE):
         end = min(start + BATCH_SIZE, review_count)
         batches.append((start, end))
-
     for batch_idx, (start, end) in enumerate(batches):
         batch_num = batch_idx + 1
         batch_personas = all_personas[start:end]
         batch_count = end - start
         global_start_num = start + 1
-
-        persona_text = "\n".join([
-            f"{global_start_num + i}번 리뷰: {p}"
-            for i, p in enumerate(batch_personas)
-        ])
-
+        persona_text = "\n".join([f"{global_start_num + i}번 리뷰: {p}" for i, p in enumerate(batch_personas)])
         prev_summary = ""
         if all_reviews:
             recent = all_reviews[-20:]
@@ -356,70 +324,35 @@ def generate_reviews_with_claude(client, product_info, selling_points, review_co
                 first_line = content.split('\n')[0][:60]
                 prev_lines.append(f"- {num}번: {first_line}...")
             prev_summary = "\n[이미 작성된 리뷰 도입부 (절대 유사하게 쓰지 말 것)]\n" + "\n".join(prev_lines)
-
         image_section = ""
         if image_description:
-            image_section = f"""
-[제품 이미지 분석 결과 - 이 내용을 바탕으로 실제 제품을 본 것처럼 리뷰에 자연스럽게 반영해라]
-{image_description}
-"""
-
-        user_content = []
+            image_section = f"\n[제품 이미지 분석 결과]\n{image_description}\n"
         prompt = f"""너는 실제 구매자처럼 자연스러운 한국어 리뷰를 쓰는 전문 작가야.
-
 [제품 정보]
 {product_info}
-
-[소구점 / 강조할 내용]
-{selling_points if selling_points else "없음 (제품 정보 기반으로 자유롭게 작성)"}
+[소구점]
+{selling_points if selling_points else "없음"}
 {image_section}
 [작성 조건]
 - 이번 배치: {global_start_num}번 ~ {end}번 리뷰 (총 {batch_count}개)
 - 리뷰당 글자 수: 약 {char_count}자 내외
-- 각 리뷰는 아래 페르소나에 맞게 말투와 내용을 다르게 작성
-
 [페르소나 배정]
 {persona_text}
 {prev_summary}
-
 [필수 규칙]
 1. 번호는 {global_start_num}부터 시작, 각 리뷰는 "번호." 한 줄 후 리뷰 내용
-   예시:
-   {global_start_num}.
-   리뷰 내용...
-
-   {global_start_num+1}.
-   리뷰 내용...
-
-2. 그림 이모지 절대 사용 금지 (🌈 ☂️ ❤️ ⭐ 등 유니코드 이모티콘 전부 금지)
-3. 텍스트 감성 표현 자연스럽게 허용 (ㅎㅎ, ㅋㅋ, ~!, ~~, !!, ㅠㅠ 등)
-4. 리뷰 간 표현·문장구조·도입부·마무리 절대 중복 금지
+2. 그림 이모지 절대 사용 금지
+3. 텍스트 감성 표현 자연스럽게 허용 (ㅎㅎ, ㅋㅋ 등)
+4. 리뷰 간 표현·문장구조 절대 중복 금지
 5. 페르소나에 맞는 실제 사람 말투 사용
-   - 20대: 가볍고 솔직한 톤, 줄임말 가능
-   - 30-40대: 실용적이고 구체적인 톤
-   - 50-60대: 차분하고 정중한 톤
-6. 구매 동기, 사용 경험, 구체적 디테일이 각 리뷰마다 달라야 함
-
-정확히 {batch_count}개 리뷰를 작성해줘. 설명이나 부연 없이 리뷰만 출력해.
-"""
-
-        user_content.append({"type": "text", "text": prompt})
-
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=8000,
-            messages=[{"role": "user", "content": user_content}]
-        )
-
+정확히 {batch_count}개 리뷰를 작성해줘. 설명이나 부연 없이 리뷰만 출력해."""
+        response = client.messages.create(model="claude-sonnet-4-6", max_tokens=8000, messages=[{"role": "user", "content": prompt}])
         raw_text = response.content[0].text.strip()
         batch_reviews = parse_generated_reviews(raw_text)
-
         if batch_reviews:
             all_reviews.extend(batch_reviews)
-
         if progress_callback:
             progress_callback(batch_idx + 1, len(batches), len(all_reviews))
-
     return all_reviews
 
 def parse_generated_reviews(text):
@@ -427,7 +360,6 @@ def parse_generated_reviews(text):
     reviews = []
     current_num = None
     current_lines = []
-
     for line in lines:
         stripped = line.strip()
         num_match = re.match(r'^(\d+)[.\)]?\s*$', stripped)
@@ -441,21 +373,16 @@ def parse_generated_reviews(text):
         else:
             if current_num is not None:
                 current_lines.append(line)
-
     if current_num is not None and current_lines:
         content = '\n'.join(current_lines).strip()
         if content:
             reviews.append((current_num, content))
-
     return sorted(reviews, key=lambda x: x[0])
 
-
-# ✅ BUG FIX 2: AI 상품 매칭용 헬퍼 — 응답에서 코드/브랜드 추출 (robust parsing)
 def parse_match_response(text):
     mc, mb = "미등록", "미등록"
     for line in text.split('\n'):
         line = line.strip()
-        # 상품코드 파싱: "상품코드:" 또는 "상품코드 표:" 둘 다 처리
         if re.search(r'상품코드\s*(?:표)?\s*:', line):
             val = re.split(r'상품코드\s*(?:표)?\s*:', line, maxsplit=1)[1]
             val = re.sub(r'[*_`]', '', val).strip()
@@ -463,7 +390,6 @@ def parse_match_response(text):
                 mc = val
             elif val == '미등록':
                 mc = '미등록'
-        # 브랜드 파싱
         if re.search(r'브랜드\s*:', line):
             val = re.split(r'브랜드\s*:', line, maxsplit=1)[1]
             val = re.sub(r'[*_`]', '', val).strip()
@@ -473,6 +399,667 @@ def parse_match_response(text):
                 mb = '미등록'
     return mc, mb
 
+
+# ==================== 함소아 보고서 관련 ====================
+
+HAMSOA_SHEET_URL = "https://docs.google.com/spreadsheets/d/1yozxvC3iXhCkbC3yXf5ad6PHaaZC3yQEvEXhpRcnGwc/"
+
+def get_hamsoa_sheet(worksheet_name):
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        try:
+            creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        except:
+            BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+            creds = ServiceAccountCredentials.from_json_keyfile_name(
+                os.path.join(BASE_DIR, 'service_account.json'), scope)
+        client_gs = gspread.authorize(creds)
+        return client_gs.open_by_url(HAMSOA_SHEET_URL).worksheet(worksheet_name)
+    except Exception as e:
+        st.error(f"함소아 시트 연결 실패 ({worksheet_name}): {e}")
+        return None
+
+def find_current_block_start(rows, no_col=0):
+    """A열 번호가 1로 재시작되는 마지막 위치 반환"""
+    last_start = 0
+    prev_num = 0
+    for i, row in enumerate(rows):
+        if len(row) > no_col:
+            cell = str(row[no_col]).strip()
+            try:
+                num = int(cell)
+                if num == 1 and prev_num >= 5:
+                    last_start = i
+                prev_num = num
+            except:
+                pass
+    return last_start
+
+def _get_field(rec, keys):
+    for k in keys:
+        if k in rec and str(rec[k]).strip():
+            return str(rec[k]).strip()
+    return ''
+
+def parse_competitor_sheet(sheet):
+    all_values = sheet.get_all_values()
+    if not all_values:
+        return [], {}
+
+    # 헤더 행 찾기
+    header_row_idx = 0
+    for i, row in enumerate(all_values):
+        joined = ' '.join(str(c) for c in row)
+        if ('경쟁사' in joined or 'NO' in joined.upper()) and '매체사' in joined and '발행' in joined:
+            header_row_idx = i
+            break
+
+    headers = [str(h).strip() for h in all_values[header_row_idx]]
+    data_rows = all_values[header_row_idx + 1:]
+
+    block_start = find_current_block_start(data_rows, 0)
+    current_rows = data_rows[block_start:]
+
+    records = []
+    for row in current_rows:
+        if len(row) > 1 and str(row[0]).strip().isdigit():
+            record = {}
+            for j, h in enumerate(headers):
+                record[h] = row[j].strip() if j < len(row) else ''
+            records.append(record)
+
+    # 병원별 통계
+    hospital_counts = {}
+    strategy_by_hospital = {}
+    for rec in records:
+        comp = _get_field(rec, ['경쟁사', '병원', '업체'])
+        if not comp:
+            continue
+        hospital_counts[comp] = hospital_counts.get(comp, 0) + 1
+        strategy = _get_field(rec, ['전략유형', '전략 유형', '전략'])
+        if comp not in strategy_by_hospital:
+            strategy_by_hospital[comp] = {}
+        if strategy:
+            strategy_by_hospital[comp][strategy] = strategy_by_hospital[comp].get(strategy, 0) + 1
+
+    return records, {
+        'hospital_counts': hospital_counts,
+        'strategy_by_hospital': strategy_by_hospital,
+        'headers': headers,
+    }
+
+def parse_hamsoa_sheet(sheet):
+    all_values = sheet.get_all_values()
+    if not all_values:
+        return [], []
+
+    articles = []
+    billing = []
+
+    article_header_idx = -1
+    billing_header_idx = -1
+
+    for i, row in enumerate(all_values):
+        joined = ' '.join(str(c) for c in row)
+        if '발행일' in joined and '구분' in joined and '제목' in joined and article_header_idx < 0:
+            article_header_idx = i
+        if '매체사' in joined and '분류' in joined and ('건당' in joined or '견적' in joined) and billing_header_idx < 0:
+            billing_header_idx = i
+
+    if article_header_idx >= 0:
+        art_headers = [str(h).strip() for h in all_values[article_header_idx]]
+        end_idx = billing_header_idx if 0 < billing_header_idx > article_header_idx else len(all_values)
+        for i, row in enumerate(all_values[article_header_idx + 1:end_idx], start=article_header_idx + 1):
+            if len(row) > 1 and str(row[0]).strip() and str(row[0]).strip() not in ['발행일', '']:
+                record = {}
+                for j, h in enumerate(art_headers):
+                    record[h] = row[j].strip() if j < len(row) else ''
+                articles.append(record)
+
+    if billing_header_idx >= 0:
+        bill_headers = [str(h).strip() for h in all_values[billing_header_idx]]
+        for row in all_values[billing_header_idx + 1:]:
+            if len(row) > 1 and str(row[0]).strip():
+                cell0 = str(row[0]).strip().upper()
+                if 'TOTAL' in cell0 or 'TOAL' in cell0:
+                    continue
+                record = {}
+                has_data = False
+                for j, h in enumerate(bill_headers):
+                    val = row[j].strip() if j < len(row) else ''
+                    record[h] = val
+                    if val and j > 0:
+                        has_data = True
+                if has_data:
+                    billing.append(record)
+
+    return articles, billing
+
+def make_bar_chart(hospital_counts, hamsoa_count):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    try:
+        plt.rcParams['font.family'] = 'Malgun Gothic'
+    except:
+        try:
+            plt.rcParams['font.family'] = 'NanumGothic'
+        except:
+            pass
+    plt.rcParams['axes.unicode_minus'] = False
+
+    color_map = {
+        '함소아 한의원': '#4472C4',
+        '자생한방병원': '#FF4444',
+        '폴리한의원': '#FFC000',
+        '아이누리한의원': '#70AD47',
+        '꽃피는 한의원': '#ED7D31',
+        '해아림한의원': '#4BACC6',
+        '헤아림한의원': '#4BACC6',
+    }
+
+    all_data = {'함소아 한의원': hamsoa_count}
+    all_data.update(hospital_counts)
+
+    sorted_names = ['함소아 한의원'] + sorted(
+        [h for h in hospital_counts], key=lambda x: hospital_counts.get(x, 0), reverse=True)
+    counts = [all_data.get(h, 0) for h in sorted_names]
+    colors = [color_map.get(h, '#888888') for h in sorted_names]
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    bars = ax.bar(range(len(sorted_names)), counts, color=colors, width=0.5, edgecolor='white')
+
+    ax.set_xticks(range(len(sorted_names)))
+    ax.set_xticklabels(sorted_names, fontsize=10)
+    ax.set_title("각 병원별 보도자료 배포 수량", fontsize=13, fontweight='bold', pad=15)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.5)
+    ax.set_axisbelow(True)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    # 범례
+    legend_patches = [plt.Rectangle((0, 0), 1, 1, color=color_map.get(n, '#888888')) for n in sorted_names]
+    ax.legend(legend_patches, sorted_names, loc='upper right', fontsize=8, ncol=2)
+
+    for bar, count in zip(bars, counts):
+        if count > 0:
+            ax.text(bar.get_x() + bar.get_width() / 2., bar.get_height() + 0.3,
+                    str(count), ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+    buf.seek(0)
+    plt.close()
+    return buf
+
+def make_strategy_chart(strategy_by_hospital):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    try:
+        plt.rcParams['font.family'] = 'Malgun Gothic'
+    except:
+        try:
+            plt.rcParams['font.family'] = 'NanumGothic'
+        except:
+            pass
+    plt.rcParams['axes.unicode_minus'] = False
+
+    if not strategy_by_hospital:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.text(0.5, 0.5, '데이터 없음', ha='center', va='center', fontsize=14)
+        ax.axis('off')
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+        buf.seek(0)
+        plt.close()
+        return buf
+
+    all_strategies = set()
+    for strats in strategy_by_hospital.values():
+        all_strategies.update(strats.keys())
+    strategy_list = sorted(all_strategies)
+
+    hospitals = list(strategy_by_hospital.keys())
+    x = list(range(len(hospitals)))
+    width = 0.7 / max(len(strategy_list), 1)
+
+    strat_colors = {
+        '브랜드 강화형': '#4472C4',
+        '질환 타깃형': '#FF4444',
+        '시술 중심형': '#FFC000',
+        '마케팅 형': '#70AD47',
+        '마케팅형': '#70AD47',
+    }
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    for i, strategy in enumerate(strategy_list):
+        counts = [strategy_by_hospital[h].get(strategy, 0) for h in hospitals]
+        offset = (i - len(strategy_list) / 2 + 0.5) * width
+        color = strat_colors.get(strategy, f'C{i}')
+        ax.bar([xi + offset for xi in x], counts, width=width * 0.9, label=strategy, color=color)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(hospitals, fontsize=9)
+    ax.set_title("경쟁사 전략유형 별 집계 현황", fontsize=13, fontweight='bold', pad=15)
+    ax.legend(loc='upper right', fontsize=9)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.5)
+    ax.set_axisbelow(True)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+    buf.seek(0)
+    plt.close()
+    return buf
+
+def _set_cell_bg(cell, hex_color):
+    from pptx.oxml.ns import qn
+    from lxml import etree
+    tc = cell._tc
+    tcPr = tc.find(qn('a:tcPr'))
+    if tcPr is None:
+        tcPr = etree.SubElement(tc, qn('a:tcPr'))
+    for child in list(tcPr):
+        tag = child.tag
+        if 'Fill' in tag or 'fill' in tag:
+            tcPr.remove(child)
+    solidFill = etree.SubElement(tcPr, qn('a:solidFill'))
+    srgbClr = etree.SubElement(solidFill, qn('a:srgbClr'))
+    srgbClr.set('val', hex_color.replace('#', '').upper())
+    tcPr.insert(0, solidFill)
+
+def _style_cell(cell, text, bg_hex=None, fg_hex=None, font_size=8,
+                bold=False, center=False, italic=False):
+    from pptx.util import Pt
+    from pptx.enum.text import PP_ALIGN
+    from pptx.dml.color import RGBColor
+
+    cell.text = ""
+    tf = cell.text_frame
+    tf.word_wrap = True
+    para = tf.paragraphs[0]
+    para.alignment = PP_ALIGN.CENTER if center else PP_ALIGN.LEFT
+
+    run = para.add_run()
+    run.text = str(text)
+    run.font.size = Pt(font_size)
+    run.font.bold = bold
+    run.font.italic = italic
+    if fg_hex:
+        h = fg_hex.replace('#', '')
+        run.font.color.rgb = RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    if bg_hex:
+        _set_cell_bg(cell, bg_hex)
+
+def generate_hamsoa_ppt(competitor_records, meta, hamsoa_articles, billing_data,
+                         report_date, report_month, hamsoa_article_count):
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN
+
+    NAVY_RGB = RGBColor(0x1A, 0x2B, 0x4A)
+    WHITE_RGB = RGBColor(0xFF, 0xFF, 0xFF)
+    GRAY_RGB = RGBColor(0xAA, 0xAA, 0xAA)
+    NAVY_HEX = "1A2B4A"
+    BEIGE_HEX = "F5E3BA"
+    WHITE_HEX = "FFFFFF"
+    ALT_HEX = "F2F2F2"
+
+    prs = Presentation()
+    prs.slide_width = Inches(13.33)
+    prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+
+    def new_slide():
+        return prs.slides.add_slide(blank)
+
+    def set_bg(slide, hex_color):
+        bg = slide.background
+        fill = bg.fill
+        fill.solid()
+        h = hex_color.replace('#', '')
+        fill.fore_color.rgb = RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+    def txt(slide, text, left, top, width, height,
+            size=11, bold=False, rgb=None, align=PP_ALIGN.LEFT, italic=False):
+        box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
+        tf = box.text_frame
+        tf.word_wrap = True
+        para = tf.paragraphs[0]
+        para.alignment = align
+        run = para.add_run()
+        run.text = str(text)
+        run.font.size = Pt(size)
+        run.font.bold = bold
+        run.font.italic = italic
+        if rgb:
+            run.font.color.rgb = rgb
+        return box
+
+    def aligo_mark(slide):
+        txt(slide, "ALIGO", 12.1, 0.1, 1.1, 0.28, size=8, rgb=GRAY_RGB, align=PP_ALIGN.RIGHT)
+        txt(slide, "MEDIA", 12.1, 0.35, 1.1, 0.28, size=8, rgb=GRAY_RGB, align=PP_ALIGN.RIGHT)
+
+    def section_title(slide, title_text):
+        txt(slide, title_text, 0.5, 0.35, 12.5, 0.55, size=14, bold=True, rgb=NAVY_RGB)
+        line = slide.shapes.add_connector(1, Inches(0.5), Inches(0.95), Inches(12.8), Inches(0.95))
+        line.line.color.rgb = NAVY_RGB
+        line.line.width = Pt(1.2)
+
+    def bullet_box(slide, bullets, left, top, width, height):
+        box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
+        box.fill.solid()
+        box.fill.fore_color.rgb = RGBColor(0xEF, 0xF6, 0xFF)
+        box.line.color.rgb = RGBColor(0xC5, 0xD8, 0xF0)
+        box.line.width = Pt(0.75)
+        tf = box.text_frame
+        tf.word_wrap = True
+        for i, bullet_text in enumerate(bullets):
+            para = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+            para.space_before = Pt(5)
+            run = para.add_run()
+            run.text = f"➡  {bullet_text}"
+            run.font.size = Pt(9)
+            run.font.color.rgb = NAVY_RGB
+
+    def add_pic(slide, img_buf, left, top, width, height):
+        img_buf.seek(0)
+        slide.shapes.add_picture(img_buf, Inches(left), Inches(top), Inches(width), Inches(height))
+
+    def add_table(slide, data, col_widths, left, top, max_height=5.8):
+        rows_n = len(data)
+        cols_n = len(data[0]) if data else 1
+        row_h = min(max_height / rows_n, 0.55)
+        tbl_h = row_h * rows_n
+        tbl = slide.shapes.add_table(
+            rows_n, cols_n,
+            Inches(left), Inches(top),
+            Inches(sum(col_widths)), Inches(tbl_h)
+        ).table
+        for ci, cw in enumerate(col_widths):
+            tbl.columns[ci].width = Inches(cw)
+        for ri, row_data in enumerate(data):
+            for ci, val in enumerate(row_data):
+                cell = tbl.cell(ri, ci)
+                is_header = ri == 0
+                is_total = ri == rows_n - 1 and str(data[ri][0]).upper().startswith('TOTAL')
+                is_alt = ri % 2 == 0 and not is_header
+
+                if is_header:
+                    bg, fg = BEIGE_HEX, NAVY_HEX
+                elif is_total:
+                    bg, fg = NAVY_HEX, WHITE_HEX
+                elif is_alt:
+                    bg, fg = ALT_HEX, "333333"
+                else:
+                    bg, fg = WHITE_HEX, "333333"
+
+                # 예정 행 빨간 글씨
+                if not is_header and '예정' in str(val):
+                    fg = "CC0000"
+
+                center_cols = {0, 1, 2, 3, 5, 6}  # 보통 날짜/숫자 컬럼
+                _style_cell(cell, val, bg_hex=bg, fg_hex=fg,
+                            font_size=9 if is_header else 8,
+                            bold=is_header or is_total,
+                            center=(ci in center_cols))
+        return tbl
+
+    # ── SLIDE 1: Cover ──────────────────────────────────────
+    s1 = new_slide()
+    set_bg(s1, NAVY_HEX)
+    txt(s1, "ALIGO", 11.9, 0.18, 1.2, 0.3, size=9, rgb=GRAY_RGB, align=PP_ALIGN.RIGHT)
+    txt(s1, "MEDIA", 11.9, 0.46, 1.2, 0.3, size=9, rgb=GRAY_RGB, align=PP_ALIGN.RIGHT)
+    txt(s1, "함소아 한의원", 0.8, 1.8, 11.7, 2.0,
+        size=58, bold=True, rgb=WHITE_RGB, align=PP_ALIGN.CENTER)
+    txt(s1, "REPORT", 0.5, 4.9, 8.0, 1.6, size=62, bold=True, rgb=WHITE_RGB)
+    txt(s1, report_date, 7.0, 5.8, 6.0, 0.55, size=14, bold=True, rgb=WHITE_RGB, align=PP_ALIGN.RIGHT)
+    txt(s1, "종합 리포트", 7.0, 6.32, 6.0, 0.4, size=11, rgb=WHITE_RGB, align=PP_ALIGN.RIGHT)
+
+    # ── SLIDE 2: Contents ────────────────────────────────────
+    s2 = new_slide()
+    set_bg(s2, "F0F0F0")
+    aligo_mark(s2)
+    txt(s2, f"{report_month} 종합 리포트", 0.7, 0.32, 8.0, 0.42, size=12, bold=True, rgb=NAVY_RGB)
+    txt(s2, "CONTENTS", 0.7, 0.7, 11.5, 1.5, size=72, bold=True, rgb=NAVY_RGB)
+
+    contents_items = [
+        ("01", "언론보도 발행 수량 비교 (함소아 vs 경쟁사)"),
+        ("02", "경쟁사 기사 발행 정보 상세 분석"),
+        ("03", "병원별 기사 발행 현황 요약"),
+        ("04", "함소아 기사 발행 현황 요약"),
+        ("05", "브릿지경제 지면보도 현황"),
+        ("06", "함소아 기사 집행 금액 정산표"),
+    ]
+    for i, (num, label) in enumerate(contents_items):
+        col_idx = i // 3
+        row_idx = i % 3
+        bx = 0.7 + col_idx * 6.4
+        by = 2.55 + row_idx * 1.25
+
+        nb = s2.shapes.add_shape(1, Inches(bx), Inches(by), Inches(0.52), Inches(0.42))
+        nb.fill.solid()
+        nb.fill.fore_color.rgb = NAVY_RGB
+        nb.line.fill.background()
+        np_ = nb.text_frame.paragraphs[0]
+        np_.alignment = PP_ALIGN.CENTER
+        nr = np_.add_run()
+        nr.text = num
+        nr.font.size = Pt(12)
+        nr.font.bold = True
+        nr.font.color.rgb = WHITE_RGB
+
+        txt(s2, label, bx + 0.62, by + 0.02, 5.6, 0.42, size=11, rgb=NAVY_RGB)
+
+    # ── SLIDE 3: 언론보도 발행 수량 비교 ─────────────────────
+    s3 = new_slide()
+    aligo_mark(s3)
+    section_title(s3, "1. 언론보도 발행 수량 비교 (함소아 vs 경쟁사)")
+
+    hospital_counts = meta.get('hospital_counts', {})
+    chart_buf = make_bar_chart(hospital_counts, hamsoa_article_count)
+    add_pic(s3, chart_buf, 0.4, 1.05, 9.3, 4.6)
+
+    total_comp = sum(hospital_counts.values())
+    top_h = max(hospital_counts, key=hospital_counts.get) if hospital_counts else ''
+    top_c = hospital_counts.get(top_h, 0)
+
+    bullets_s3 = []
+    if top_h:
+        bullets_s3.append(f"{report_date} 기준, {top_h}은(는) 총 {top_c}건으로 전체 병원 중 가장 많은 기사 발행 수를 기록했습니다.")
+    bullets_s3.append(f"함소아한의원은 총 {hamsoa_article_count}건의 언론보도를 발행하였습니다.")
+    for h, c in sorted(hospital_counts.items(), key=lambda x: x[1], reverse=True)[:2]:
+        if h != top_h:
+            bullets_s3.append(f"{h}: {c}건 발행")
+    bullet_box(s3, bullets_s3[:3], 9.85, 1.05, 3.2, 4.6)
+
+    # ── SLIDES 4+: 경쟁사 기사 발행 정보 상세 분석 ──────────
+    COMP_KEY_MAP = {
+        '경쟁사': ['경쟁사', '병원'],
+        '매체사': ['매체사', '매체'],
+        '발행일': ['발행일자', '발행일', '날짜'],
+        '주요키워드': ['메인키워드', '주요키워드', '키워드', '메인 키워드'],
+        '제목': ['제목', '기사제목'],
+        '월간 검색량': ['월간 검색량', '월간검색량', '검색량'],
+    }
+    comp_header_row = ['NO.', '경쟁사', '매체사', '발행일', '주요키워드', '제목', '월간 검색량']
+    comp_col_w = [0.45, 1.2, 1.2, 0.95, 1.0, 5.6, 1.0]
+
+    ROWS_PER = 10
+    total_rec = len(competitor_records)
+    n_comp_slides = max(1, -(-total_rec // ROWS_PER))
+
+    for si in range(n_comp_slides):
+        sld = new_slide()
+        aligo_mark(sld)
+        section_title(sld, f"2. 경쟁사 기사 발행 정보 상세 분석 ({si + 1})")
+
+        batch = competitor_records[si * ROWS_PER: (si + 1) * ROWS_PER]
+        table_data = [comp_header_row]
+        for k, rec in enumerate(batch):
+            table_data.append([
+                str(si * ROWS_PER + k + 1),
+                _get_field(rec, COMP_KEY_MAP['경쟁사']),
+                _get_field(rec, COMP_KEY_MAP['매체사']),
+                _get_field(rec, COMP_KEY_MAP['발행일']),
+                _get_field(rec, COMP_KEY_MAP['주요키워드']),
+                _get_field(rec, COMP_KEY_MAP['제목']),
+                _get_field(rec, COMP_KEY_MAP['월간 검색량']),
+            ])
+        add_table(sld, table_data, comp_col_w, left=0.35, top=1.1)
+
+    # 경쟁사 분석 텍스트 슬라이드
+    s_comp_txt = new_slide()
+    aligo_mark(s_comp_txt)
+    section_title(s_comp_txt, f"2. 경쟁사 기사 발행 정보 상세 분석 ({n_comp_slides + 1})")
+
+    top_hospitals = sorted(hospital_counts.items(), key=lambda x: x[1], reverse=True)
+    analysis_bullets = [f"총 {total_comp}건의 경쟁사 기사 중, {top_h}이(가) 총 {top_c}건으로 가장 높은 기사 발행 빈도를 보였습니다." if top_h else "데이터를 분석하고 있습니다."]
+    for h, c in top_hospitals[:4]:
+        if c > 0:
+            strats = meta.get('strategy_by_hospital', {}).get(h, {})
+            top_s = max(strats, key=strats.get) if strats else ''
+            analysis_bullets.append(f"{h}: {c}건 ({top_s} 중심)" if top_s else f"{h}: {c}건 발행")
+    bullet_box(s_comp_txt, analysis_bullets[:5], 0.5, 1.2, 12.3, 3.5)
+
+    # ── 병원별 기사 발행 현황 ────────────────────────────────
+    s_hosp = new_slide()
+    aligo_mark(s_hosp)
+    section_title(s_hosp, "3. 병원별 기사 발행 현황 요약")
+
+    strat_chart_buf = make_strategy_chart(meta.get('strategy_by_hospital', {}))
+    add_pic(s_hosp, strat_chart_buf, 0.4, 1.05, 9.5, 5.0)
+
+    hosp_bullets = []
+    for h, strats in sorted(meta.get('strategy_by_hospital', {}).items(),
+                             key=lambda x: sum(x[1].values()), reverse=True)[:4]:
+        total = sum(strats.values())
+        top_s = max(strats, key=strats.get) if strats else ''
+        hosp_bullets.append(f"{h}: 총 {total}건 ({top_s} {strats.get(top_s, 0)}건)")
+    if hosp_bullets:
+        bullet_box(s_hosp, hosp_bullets, 10.05, 1.05, 3.1, 5.0)
+
+    # ── 함소아 기사 발행 현황 ────────────────────────────────
+    ART_KEYS = ['발행일', '구분', '제목', '매체사', '메인 키워드', '검색량', '진행 현황', '본문 요약']
+    ART_KEY_ALT = ['발행일', '구분', '제목', '매체사', '메인키워드', '검색량', '진행현황', '본문요약']
+    ART_HDR = ['발행일', '구분', '제목', '매체사', '메인 키워드', '검색량', '진행현황', '본문 요약']
+    ART_COL_W = [0.95, 0.75, 2.5, 1.05, 1.05, 0.65, 0.85, 4.7]
+
+    ART_ROWS = 7
+    total_arts = len(hamsoa_articles)
+    n_art_slides = max(1, -(-total_arts // ART_ROWS))
+
+    for si in range(n_art_slides):
+        sld = new_slide()
+        aligo_mark(sld)
+        section_title(sld, f"4. 함소아 기사 발행 현황 요약 ({si + 1})")
+
+        batch = hamsoa_articles[si * ART_ROWS: (si + 1) * ART_ROWS]
+        table_data = [ART_HDR]
+        for art in batch:
+            row = []
+            for k, k_alt in zip(ART_KEYS, ART_KEY_ALT):
+                val = art.get(k, art.get(k_alt, art.get(k.replace(' ', ''), '')))
+                row.append(val)
+            table_data.append(row)
+        add_table(sld, table_data, ART_COL_W, left=0.35, top=1.1)
+
+    # 함소아 기사 분석 텍스트
+    s_art_txt = new_slide()
+    aligo_mark(s_art_txt)
+    section_title(s_art_txt, f"4. 함소아 기사 발행 현황 요약 ({n_art_slides + 1})")
+
+    completed = [a for a in hamsoa_articles
+                 if '완료' in str(a.get('진행 현황', a.get('진행현황', '')))]
+    planned = [a for a in hamsoa_articles
+               if '예정' in str(a.get('진행 현황', a.get('진행현황', '')))]
+
+    art_bullets = [
+        f"{report_date} 기준, 총 {total_arts}건의 기사 중 {len(completed)}건은 발행 완료입니다.(기획기사 및 명의칼럼 포함)",
+    ]
+    if planned:
+        art_bullets.append(f"예정된 기사: {len(planned)}건")
+
+    keyword_counter = {}
+    for a in hamsoa_articles:
+        kw = a.get('메인 키워드', a.get('메인키워드', ''))
+        if kw:
+            keyword_counter[kw] = keyword_counter.get(kw, 0) + 1
+
+    bullet_box(s_art_txt, art_bullets, 0.5, 1.2, 12.3, 3.5)
+
+    # ── 브릿지경제 지면보도 ──────────────────────────────────
+    s_bridge = new_slide()
+    aligo_mark(s_bridge)
+    section_title(s_bridge, "5. 함소아 브릿지경제 지면보도 현황")
+
+    bridge_arts = [a for a in hamsoa_articles
+                   if '브릿지' in str(a.get('매체사', ''))]
+
+    bridge_data = [['NO.', '게재일', '키워드', '기사 제목']]
+    for i, art in enumerate(bridge_arts):
+        bridge_data.append([
+            str(i + 1),
+            art.get('발행일', ''),
+            art.get('메인 키워드', art.get('메인키워드', '')),
+            art.get('제목', ''),
+        ])
+
+    if len(bridge_data) > 1:
+        add_table(s_bridge, bridge_data, [0.5, 1.3, 1.5, 9.2], left=0.35, top=1.1, max_height=4.0)
+    else:
+        txt(s_bridge, "브릿지경제 지면보도 데이터가 없습니다. (매체사 열에 '브릿지경제'로 입력된 항목이 있으면 자동 집계됩니다.)",
+            0.5, 2.0, 12.0, 1.0, size=11, rgb=NAVY_RGB)
+
+    # ── 함소아 집행 금액 정산표 ──────────────────────────────
+    s_bill = new_slide()
+    aligo_mark(s_bill)
+    section_title(s_bill, "6. 함소아 기사 집행 금액 정산표")
+
+    if billing_data:
+        bill_hdr = ['매체사', '분류', '개재 건수', '건당 견적', '매체별 합산']
+        bill_table_data = [bill_hdr]
+        total_amount = 0
+
+        for rec in billing_data:
+            vals = list(rec.values())
+            row = (vals + [''] * 5)[:5]
+            bill_table_data.append(row)
+            try:
+                amt_str = str(vals[4] if len(vals) > 4 else (vals[-1] if vals else '')).replace(',', '').replace('원', '').strip()
+                if amt_str.isdigit():
+                    total_amount += int(amt_str)
+            except:
+                pass
+
+        bill_table_data.append(['TOTAL', f"기획기사 {len(billing_data) - 1}건 + 보고서 집계",
+                                 f"{len(billing_data)}건", '', f"{total_amount:,}원" if total_amount else ''])
+
+        add_table(s_bill, bill_table_data, [2.8, 2.5, 1.3, 1.3, 1.6], left=1.8, top=1.1, max_height=5.5)
+
+        txt(s_bill, "※ 해당 금액은 VAT 별도 기준입니다",
+            1.8, 1.1 + 0.55 * len(bill_table_data) + 0.15, 9.5, 0.35,
+            size=9, italic=True, rgb=RGBColor(0x88, 0x88, 0x88))
+    else:
+        txt(s_bill, "정산 데이터가 없습니다.",
+            0.5, 2.0, 12.0, 0.5, size=11, rgb=NAVY_RGB)
+
+    # 저장
+    buf = io.BytesIO()
+    prs.save(buf)
+    buf.seek(0)
+    return buf
+
+
+# ==================== Streamlit 앱 ====================
 
 st.set_page_config(page_title="버즈필터 자동화", page_icon="🤖", layout="wide")
 
@@ -484,7 +1071,8 @@ with st.sidebar:
         "✍️ 리뷰 생성",
         "📝 리뷰 입력",
         "📄 견적서 생성",
-        "🌐 홈페이지 자동 개선"
+        "🌐 홈페이지 자동 개선",
+        "📊 함소아 보고서",
     ], label_visibility="collapsed")
     st.markdown("---")
     st.caption("버즈필터 업무 자동화 시스템")
@@ -508,60 +1096,39 @@ if menu == "🏭 버즈필터 발주":
                 calc_df = pd.DataFrame(amd[2:], columns=amd[1])
                 calc_df = calc_df[calc_df['제품명'].str.strip() != '']
                 st.success(f"✅ 마진계산기 로드 완료 ({len(calc_df)}개 상품)")
-
             with st.spinner("AI가 상품 매칭 중..."):
                 today = datetime.now()
                 rows_to_add, match_results = [], []
-
-                # ✅ BUG FIX 2: 컬럼명 정규화 — '상품코드 표' → '상품코드'로 통일해서 AI 혼동 방지
                 product_col = '상품코드 표' if '상품코드 표' in calc_df.columns else '상품코드'
                 display_df = calc_df[['브랜드', '제품명', product_col]].copy()
                 display_df = display_df.rename(columns={product_col: '상품코드'})
-
                 for idx, row in df.iterrows():
                     raw = str(row.get('상품명+옵션+개수', ''))
                     qty = extract_qty_from_text(raw)
                     price = int(row.get('가격', 0))
                     ch = str(row.get('판매처', '쿠팡'))
-
                     prompt = f"""너는 상품 매칭 전문가야.
 발주서 상품명: {raw}
-
 상품 리스트 (브랜드 / 제품명 / 상품코드):
 {display_df.to_string(index=False)}
-
 규칙:
-1. 브랜드명이나 핵심 키워드가 겹치면 매칭해라 (정확히 일치 안해도 됨)
-2. 예: "다이슨 공기청정기 시리즈" → 다이슨 관련 상품 중 가장 유사한 것 1개
-3. 예: "위닉스 뽀송" → 위닉스 뽀송 관련 상품 1개
-4. 가장 유사한 것 1개만 선택해라
-5. 마크다운 절대 사용 금지. 코드값에 **, *, _ 같은 기호 절대 붙이지 마라
-6. 정말 모르겠으면 미등록
-
-반드시 아래 형식으로만 답해줘 (다른 말 없이):
-상품코드: [상품 리스트의 상품코드 값]
-브랜드: [상품 리스트의 브랜드 값]
-못 찾겠으면:
-상품코드: 미등록
-브랜드: 미등록"""
-
-                    resp = client.messages.create(
-                        model="claude-haiku-4-5-20251001",
-                        max_tokens=150,
-                        messages=[{"role": "user", "content": prompt}]
-                    )
+1. 브랜드명이나 핵심 키워드가 겹치면 매칭해라
+2. 가장 유사한 것 1개만 선택해라
+3. 마크다운 절대 사용 금지
+4. 정말 모르겠으면 미등록
+반드시 아래 형식으로만 답해줘:
+상품코드: [값]
+브랜드: [값]"""
+                    resp = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=150,
+                                                  messages=[{"role": "user", "content": prompt}])
                     rt = resp.content[0].text.strip()
-                    # ✅ BUG FIX 2: robust 파싱 함수 사용
                     mc, mb = parse_match_response(rt)
-
                     match_results.append({'상품명': raw, '매칭 브랜드': mb, '매칭 코드': mc, '판매처': ch, '가격': price, '수량(파싱)': qty})
                     rows_to_add.append([f"{today.year}년", f"{today.month}월", f"{today.day}일", mb, mc, ch, price, qty])
-
                 st.session_state['rows_to_add'] = rows_to_add
                 st.session_state['match_results'] = match_results
                 st.session_state['ready_to_insert'] = True
             st.success("✅ AI 매칭 완료!")
-
         if st.session_state.get('ready_to_insert'):
             rdf = pd.DataFrame(st.session_state['match_results'])
             st.write("🔍 AI 매칭 결과")
@@ -569,7 +1136,6 @@ if menu == "🏭 버즈필터 발주":
             no_slash = rdf[~rdf['상품명'].str.contains('/', na=False)]
             if len(no_slash) > 0:
                 st.warning(f"⚠️ {len(no_slash)}건 수량 파싱 불가 → 수량 1로 처리")
-                st.dataframe(no_slash[['상품명', '수량(파싱)']])
             unm = rdf[rdf['매칭 코드'] == '미등록']
             if len(unm) > 0:
                 st.warning(f"⚠️ {len(unm)}건 상품 매칭 실패")
@@ -592,56 +1158,35 @@ if menu == "🏭 버즈필터 발주":
 elif menu == "✍️ 리뷰 생성":
     st.title("✍️ AI 리뷰 자동 생성기")
     st.subheader("제품 정보를 입력하면 자연스럽고 다양한 리뷰를 생성해드립니다.")
-
     if 'generated_reviews' not in st.session_state:
         st.session_state.generated_reviews = []
     if 'review_edit_mode' not in st.session_state:
         st.session_state.review_edit_mode = False
-
     st.markdown("### 📦 STEP 1 — 제품 정보 입력")
-
     col_left, col_right = st.columns([2, 1])
     with col_left:
-        product_info = st.text_area(
-            "제품 정보 (제품명, 카테고리, 특징 등)",
-            height=150,
-            placeholder="예)\n제품명: 콜라겐 마스크팩\n카테고리: 스킨케어\n특징: 저자극 성분, 수분 집중 케어, 붙임성 좋음, 개별 포장"
-        )
-        selling_points = st.text_area(
-            "소구점 / 강조할 내용 (선택)",
-            height=100,
-            placeholder="예) 피부 흡수력, 아침에 쓰기 좋음, 가성비, 선물용으로 좋다는 점 강조"
-        )
+        product_info = st.text_area("제품 정보 (제품명, 카테고리, 특징 등)", height=150, placeholder="예)\n제품명: 콜라겐 마스크팩\n카테고리: 스킨케어\n특징: 저자극 성분, 수분 집중 케어")
+        selling_points = st.text_area("소구점 / 강조할 내용 (선택)", height=100, placeholder="예) 피부 흡수력, 아침에 쓰기 좋음, 가성비")
     with col_right:
-        product_images = st.file_uploader(
-            "제품 이미지 (선택, 여러 장 가능)",
-            type=["jpg", "jpeg", "png", "webp"],
-            accept_multiple_files=True,
-            help="이미지를 여러 장 올리면 Claude가 더 정확하게 리뷰를 작성합니다."
-        )
+        product_images = st.file_uploader("제품 이미지 (선택, 여러 장 가능)", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True)
         if product_images:
             for img in product_images:
                 st.image(img, caption=img.name, use_container_width=True)
-
     st.markdown("### ⚙️ STEP 2 — 리뷰 설정")
     col1, col2 = st.columns(2)
     with col1:
         review_count = st.number_input("리뷰 개수", min_value=1, max_value=100, value=10, step=1)
     with col2:
         char_count = st.number_input("리뷰당 글자 수 (약)", min_value=50, max_value=500, value=150, step=10)
-
     st.markdown("---")
-
     total_batches = max(1, (review_count + 19) // 20)
     st.caption(f"💡 {review_count}개 요청 시 20개씩 {total_batches}번 나눠 생성됩니다.")
-
     if st.button("🚀 리뷰 생성 시작", type="primary", use_container_width=True):
         if not product_info.strip():
             st.error("❌ 제품 정보를 입력해주세요!")
         else:
             try:
                 ai_client = get_anthropic_client()
-
                 image_data_list = []
                 media_type_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
                 if product_images:
@@ -650,85 +1195,50 @@ elif menu == "✍️ 리뷰 생성":
                         img_bytes = product_image.read()
                         img_b64 = base64.b64encode(img_bytes).decode('utf-8')
                         ext = product_image.name.split('.')[-1].lower()
-                        image_data_list.append({
-                            "media_type": media_type_map.get(ext, "image/jpeg"),
-                            "data": img_b64
-                        })
-
+                        image_data_list.append({"media_type": media_type_map.get(ext, "image/jpeg"), "data": img_b64})
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-
                 def update_progress(current_batch, total_b, total_generated):
                     pct = int((current_batch / total_b) * 100)
                     progress_bar.progress(pct)
                     status_text.text(f"⏳ 배치 {current_batch}/{total_b} 완료 — 현재까지 {total_generated}개 생성됨")
-
-                if image_data_list:
-                    status_text.text("🔍 이미지 분석 중... (제품 특징 추출)")
                 status_text.text(f"🚀 리뷰 생성 시작 (총 {total_batches}번 배치 호출)...")
-
                 parsed = generate_reviews_with_claude(
-                    client=ai_client,
-                    product_info=product_info,
-                    selling_points=selling_points,
-                    review_count=review_count,
-                    char_count=char_count,
-                    image_data_list=image_data_list,
-                    progress_callback=update_progress
-                )
-
+                    client=ai_client, product_info=product_info, selling_points=selling_points,
+                    review_count=review_count, char_count=char_count,
+                    image_data_list=image_data_list, progress_callback=update_progress)
                 progress_bar.progress(100)
                 status_text.empty()
-
                 st.session_state.generated_reviews = list(parsed)
                 st.session_state.review_edit_mode = True
                 st.success(f"✅ 총 {len(parsed)}개 리뷰 생성 완료!")
-
             except Exception as e:
                 st.error(f"❌ 생성 실패: {e}")
-
     if st.session_state.review_edit_mode and st.session_state.generated_reviews:
         st.markdown("---")
         st.markdown(f"### 📋 STEP 3 — 결과 확인 및 수정 ({len(st.session_state.generated_reviews)}개)")
-        st.caption("각 리뷰를 직접 수정할 수 있습니다. 수정 후 아래 [저장 및 엑셀 다운로드] 버튼을 눌러주세요.")
-
         updated_reviews = []
         for i, (num, content) in enumerate(st.session_state.generated_reviews):
             with st.expander(f"리뷰 {num}번", expanded=(i < 3)):
-                edited = st.text_area(
-                    f"리뷰 {num} 내용",
-                    value=content,
-                    height=150,
-                    key=f"review_edit_{i}",
-                    label_visibility="collapsed"
-                )
+                edited = st.text_area(f"리뷰 {num} 내용", value=content, height=150, key=f"review_edit_{i}", label_visibility="collapsed")
                 updated_reviews.append((num, edited))
-
         st.markdown("---")
         st.markdown("### 💾 STEP 4 — 저장 및 다운로드")
-
         col_save, col_reset = st.columns([3, 1])
         with col_save:
             if st.button("⬇️ 저장 및 엑셀 다운로드", type="primary", use_container_width=True):
                 st.session_state.generated_reviews = updated_reviews
                 excel_data = create_excel(updated_reviews)
                 fname = f"리뷰_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-                st.download_button(
-                    label="📥 엑셀 파일 다운로드 클릭",
-                    data=excel_data,
-                    file_name=fname,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    type="primary"
-                )
+                st.download_button(label="📥 엑셀 파일 다운로드 클릭", data=excel_data, file_name=fname,
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   use_container_width=True, type="primary")
                 st.success("✅ 엑셀 파일이 준비되었습니다!")
-
         with col_reset:
             if st.button("🔄 초기화", use_container_width=True):
                 st.session_state.generated_reviews = []
                 st.session_state.review_edit_mode = False
                 st.rerun()
-
         with st.expander("📄 텍스트 전체 보기 (복사용)"):
             full_text = ""
             for num, content in st.session_state.generated_reviews:
@@ -738,20 +1248,19 @@ elif menu == "✍️ 리뷰 생성":
 elif menu == "📝 리뷰 입력":
     st.title("📝 리뷰 엑셀 자동 변환기")
     st.subheader("리뷰 텍스트 파일을 업로드하면 엑셀 파일로 자동 변환합니다.")
-
     tab1, tab2 = st.tabs(["📁 파일 업로드", "✏️ 텍스트 직접 입력"])
     with tab1:
         utxt = st.file_uploader("리뷰 텍스트 파일 (.txt)", type=["txt"])
         if utxt:
-            txt = utxt.read().decode("utf-8", errors="ignore")
+            txt_content = utxt.read().decode("utf-8", errors="ignore")
             st.success(f"✅ {utxt.name} 업로드 완료")
-            revs = parse_reviews(txt)
+            revs = parse_reviews(txt_content)
             if revs:
                 st.markdown(f"### 📊 **{len(revs)}개** 리뷰 감지됨")
                 with st.expander("👀 미리보기", expanded=True):
-                    for num,content in revs[:5]:
-                        st.markdown(f"**{num}번 리뷰**"); st.text(content[:200]+("..." if len(content)>200 else "")); st.divider()
-                    if len(revs)>5: st.info(f"... 외 {len(revs)-5}개")
+                    for num, content in revs[:5]:
+                        st.markdown(f"**{num}번 리뷰**"); st.text(content[:200] + ("..." if len(content) > 200 else "")); st.divider()
+                    if len(revs) > 5: st.info(f"... 외 {len(revs) - 5}개")
                 st.download_button("⬇️ 엑셀 다운로드", create_excel(revs), "리뷰목록.xlsx", use_container_width=True, type="primary")
             else:
                 st.error("❌ 리뷰를 파싱할 수 없습니다.")
@@ -762,8 +1271,8 @@ elif menu == "📝 리뷰 입력":
             if revs:
                 st.markdown(f"### 📊 **{len(revs)}개** 리뷰 감지됨")
                 with st.expander("👀 미리보기", expanded=True):
-                    for num,content in revs[:5]:
-                        st.markdown(f"**{num}번 리뷰**"); st.text(content[:200]+("..." if len(content)>200 else "")); st.divider()
+                    for num, content in revs[:5]:
+                        st.markdown(f"**{num}번 리뷰**"); st.text(content[:200] + ("..." if len(content) > 200 else "")); st.divider()
                 st.download_button("⬇️ 엑셀 다운로드", create_excel(revs), "리뷰목록.xlsx", use_container_width=True, type="primary")
             else:
                 st.error("❌ 리뷰를 파싱할 수 없습니다.")
@@ -778,15 +1287,14 @@ elif menu == "📄 견적서 생성":
     memo = st.text_input("비고 (선택)", placeholder="예) 패키지 할인 포함")
     st.markdown("---")
     st.markdown("### 📋 항목 입력")
-    st.caption("➕ 항목 추가 버튼으로 행을 늘리고, 🗑️ 버튼으로 삭제하세요.")
     if 'quote_items' not in st.session_state:
-        st.session_state.quote_items = [{"품목":"","구성":"","수량":1,"단가":0,"비고":""}]
-    hcols = st.columns([3,2,1,2,2,1])
-    for col,lbl in zip(hcols,["**품목**","**구성**","**수량**","**단가(원)**","**공급가액**","**삭제**"]):
+        st.session_state.quote_items = [{"품목": "", "구성": "", "수량": 1, "단가": 0, "비고": ""}]
+    hcols = st.columns([3, 2, 1, 2, 2, 1])
+    for col, lbl in zip(hcols, ["**품목**", "**구성**", "**수량**", "**단가(원)**", "**공급가액**", "**삭제**"]):
         col.markdown(lbl)
     to_del = []
-    for i,item in enumerate(st.session_state.quote_items):
-        cols = st.columns([3,2,1,2,2,1])
+    for i, item in enumerate(st.session_state.quote_items):
+        cols = st.columns([3, 2, 1, 2, 2, 1])
         item["품목"] = cols[0].text_input(f"p{i}", value=item["품목"], label_visibility="collapsed", placeholder="예) 쿠팡 리뷰")
         item["구성"] = cols[1].text_input(f"g{i}", value=item["구성"], label_visibility="collapsed", placeholder="예) 실행비")
         item["수량"] = cols[2].number_input(f"q{i}", value=item["수량"], min_value=0, label_visibility="collapsed")
@@ -797,14 +1305,14 @@ elif menu == "📄 견적서 생성":
     for i in sorted(to_del, reverse=True): st.session_state.quote_items.pop(i)
     if to_del: st.rerun()
     if st.button("➕ 항목 추가"):
-        st.session_state.quote_items.append({"품목":"","구성":"","수량":1,"단가":0,"비고":""})
+        st.session_state.quote_items.append({"품목": "", "구성": "", "수량": 1, "단가": 0, "비고": ""})
         st.rerun()
     st.markdown("---")
     valid = [it for it in st.session_state.quote_items if it["품목"].strip()]
-    sup = sum(it["수량"]*it["단가"] for it in valid)
-    vat = int(sup*0.1) if tax_type=="발행" else 0
+    sup = sum(it["수량"] * it["단가"] for it in valid)
+    vat = int(sup * 0.1) if tax_type == "발행" else 0
     tot = sup + vat
-    mc1,mc2,mc3 = st.columns(3)
+    mc1, mc2, mc3 = st.columns(3)
     mc1.metric("공급가액 합계", f"₩{sup:,}")
     if tax_type == "발행":
         mc2.metric("세액 (VAT 10%)", f"₩{vat:,}")
@@ -822,21 +1330,18 @@ elif menu == "📄 견적서 생성":
             with st.spinner("PDF 생성 중..."):
                 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
                 stamp_path = os.path.join(BASE_DIR, '직인_투명.png')
-                qd = {"date":quote_date,"client":client_name,"tax_type":tax_type,"memo":memo,"items":valid}
+                qd = {"date": quote_date, "client": client_name, "tax_type": tax_type, "memo": memo, "items": valid}
                 try:
                     pdf_buf = generate_quote_pdf(qd, stamp_path)
-                    fname = f"견적서_{client_name}_{quote_date.replace('. ','').replace('.','')}.pdf"
+                    fname = f"견적서_{client_name}_{quote_date.replace('. ', '').replace('.', '')}.pdf"
                     st.success("✅ 견적서 PDF 생성 완료!")
-                    st.download_button("⬇️ PDF 다운로드", pdf_buf, fname,
-                                       mime="application/pdf", use_container_width=True, type="primary")
+                    st.download_button("⬇️ PDF 다운로드", pdf_buf, fname, mime="application/pdf", use_container_width=True, type="primary")
                 except Exception as e:
                     st.error(f"❌ PDF 생성 실패: {e}")
-                    st.info("💡 NotoSansKR-Regular.ttf, NotoSansKR-Bold.ttf 파일이 같은 폴더에 있는지 확인해주세요!")
 
 elif menu == "🌐 홈페이지 자동 개선":
     st.title("🌐 홈페이지 자동 개선 + 자동 배포")
     st.subheader("HTML과 이미지를 업로드하면 Claude가 수정하고 Netlify에 자동 배포합니다.")
-
     try:
         NETLIFY_TOKEN = st.secrets["NETLIFY_TOKEN"]
         NETLIFY_SITE_ID = st.secrets["NETLIFY_SITE_ID"]
@@ -844,32 +1349,22 @@ elif menu == "🌐 홈페이지 자동 개선":
         st.success("✅ Netlify 연결 준비 완료 — 버튼 한 번으로 자동 배포됩니다.")
     except:
         netlify_ready = False
-        st.error("❌ Netlify 미연결 — secrets.toml에 아래 두 줄을 추가해주세요.")
-        st.code("""NETLIFY_TOKEN = "발급받은_토큰"\nNETLIFY_SITE_ID = "57340c83-2554-459c-9a49-b29fbdb9b0c0" """, language="toml")
-
+        st.error("❌ Netlify 미연결 — secrets.toml에 NETLIFY_TOKEN과 NETLIFY_SITE_ID를 추가해주세요.")
     st.markdown("---")
     st.markdown("### 📂 STEP 1 — index.html 업로드")
-    uploaded_html = st.file_uploader("index.html 업로드", type=["html","htm"], key="html_upload")
+    uploaded_html = st.file_uploader("index.html 업로드", type=["html", "htm"], key="html_upload")
     st.markdown("### 🖼️ STEP 2 — 이미지 파일 업로드")
-    st.caption("image_4.png, pr_chat.png, review_chat.png 등 홈페이지에 쓰이는 이미지를 모두 올려주세요.")
-    uploaded_images = st.file_uploader(
-        "이미지 파일 (여러 개 동시 선택 가능)",
-        type=["png","jpg","jpeg","gif","webp","ico"],
-        accept_multiple_files=True,
-        key="image_upload"
-    )
+    uploaded_images = st.file_uploader("이미지 파일 (여러 개 동시 선택 가능)", type=["png", "jpg", "jpeg", "gif", "webp", "ico"], accept_multiple_files=True, key="image_upload")
     if uploaded_images:
         st.success(f"✅ 이미지 {len(uploaded_images)}개: {', '.join([f.name for f in uploaded_images])}")
-
     st.markdown("---")
     st.markdown("### ✅ STEP 3 — 개선 항목 선택")
     col1, col2, col3 = st.columns(3)
     with col1: check_mobile = st.checkbox("📱 모바일 최적화", value=True)
     with col2: check_responsive = st.checkbox("📐 반응형 디자인", value=True)
     with col3: check_seo = st.checkbox("🔍 구글 SEO", value=True)
-    check_extra = st.text_area("📝 추가 요청사항 (선택)", placeholder="예) 버튼 색상을 더 눈에 띄게 / CTA 문구 강하게", height=80)
+    check_extra = st.text_area("📝 추가 요청사항 (선택)", placeholder="예) 버튼 색상을 더 눈에 띄게", height=80)
     st.markdown("---")
-
     if uploaded_html:
         html_content = uploaded_html.read().decode("utf-8", errors="ignore")
         if not any([check_mobile, check_responsive, check_seo, check_extra.strip()]):
@@ -877,33 +1372,26 @@ elif menu == "🌐 홈페이지 자동 개선":
         else:
             if st.button("🚀 Claude 수정 + Netlify 자동 배포", type="primary", use_container_width=True):
                 check_list = []
-                if check_mobile: check_list.append("1. 모바일 최적화 (터치 타겟 44px, iOS 폰트 방지, 햄버거 메뉴, 모바일 CTA)")
-                if check_responsive: check_list.append("2. 반응형 디자인 (브레이크포인트 3단계, clamp() 폰트, 그리드 자동 전환)")
-                if check_seo: check_list.append("3. 구글 SEO (og:image 절대경로, LocalBusiness 구조화 데이터, main/address 태그)")
+                if check_mobile: check_list.append("1. 모바일 최적화")
+                if check_responsive: check_list.append("2. 반응형 디자인")
+                if check_seo: check_list.append("3. 구글 SEO")
                 if check_extra.strip(): check_list.append(f"4. 추가 요청: {check_extra.strip()}")
-
                 prompt = f"""너는 웹 개발 전문가야. 아래 HTML을 분석하고 수정해서 완성된 HTML 코드만 반환해줘.
 [개선 항목]
 {chr(10).join(check_list)}
 [주의사항]
 - 수정된 HTML 전체 코드만 반환 (설명 없이 <!DOCTYPE html>부터 시작)
 - 기존 디자인·색상·브랜드 정체성 유지
-- 기존 기능(카운터 애니메이션, 관리자 시크릿 클릭) 유지
 - 한국어 텍스트 수정 금지
 [원본 HTML]
 {html_content}"""
-
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 try:
-                    status_text.text("🤖 Claude가 분석 및 수정 중... (30초~1분 소요)")
+                    status_text.text("🤖 Claude가 분석 및 수정 중...")
                     progress_bar.progress(20)
                     ai_client = get_anthropic_client()
-                    response = ai_client.messages.create(
-                        model="claude-opus-4-5",
-                        max_tokens=16000,
-                        messages=[{"role": "user", "content": prompt}]
-                    )
+                    response = ai_client.messages.create(model="claude-opus-4-5", max_tokens=16000, messages=[{"role": "user", "content": prompt}])
                     improved_html = response.content[0].text.strip()
                     if improved_html.startswith("```"):
                         lines = improved_html.split("\n")
@@ -935,7 +1423,6 @@ elif menu == "🌐 홈페이지 자동 개선":
                     st.error(f"❌ 오류 발생: {e}")
     else:
         st.info("👆 STEP 1에서 index.html을 업로드하면 시작할 수 있어요!")
-
     if st.session_state.get("improvement_done"):
         improved_html = st.session_state["improved_html"]
         original_html = st.session_state["original_html"]
@@ -948,18 +1435,103 @@ elif menu == "🌐 홈페이지 자동 개선":
                 st.code(original_html[:1500] + "...", language="html")
         with col_after:
             st.markdown("#### ✅ 수정 후")
-            st.metric("파일 크기", f"{len(improved_html):,}자", delta=f"{len(improved_html)-len(original_html):+,}자")
+            st.metric("파일 크기", f"{len(improved_html):,}자", delta=f"{len(improved_html) - len(original_html):+,}자")
             with st.expander("수정된 코드 보기"):
                 st.code(improved_html[:1500] + "...", language="html")
         st.markdown("---")
-        st.download_button(
-            label="⬇️ 수정된 index.html 다운로드",
-            data=improved_html.encode("utf-8"),
-            file_name="index.html",
-            mime="text/html",
-            use_container_width=True
-        )
+        st.download_button(label="⬇️ 수정된 index.html 다운로드", data=improved_html.encode("utf-8"), file_name="index.html", mime="text/html", use_container_width=True)
         if st.button("🔄 처음부터 다시", use_container_width=True):
             st.session_state["improvement_done"] = False
             st.session_state["improved_html"] = ""
             st.rerun()
+
+elif menu == "📊 함소아 보고서":
+    st.title("📊 함소아한의원 보고서 자동 생성")
+    st.subheader("스프레드시트 데이터를 읽어 PPT 보고서를 자동으로 생성합니다.")
+
+    st.info("💡 스프레드시트 탭 이름이 다르면 아래에서 직접 수정하세요.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        report_date = st.text_input("보고서 기준일",
+                                    value=datetime.now().strftime("%Y년 %m월 %d일"),
+                                    placeholder="예) 2026년 4월 21일")
+        comp_sheet_name = st.text_input("경쟁사 시트 탭 이름", value="경쟁사 동향 분석 시트")
+    with col2:
+        report_month = st.text_input("보고 월",
+                                     value=datetime.now().strftime("%Y년 %m월"),
+                                     placeholder="예) 2026년 4월")
+        mgmt_sheet_name = st.text_input("함소아 관리 시트 탭 이름", value="함소아 한의원 관리 시트")
+
+    hamsoa_manual = st.number_input(
+        "함소아 기사 발행 건수 (0이면 자동 계산)",
+        min_value=0, value=0,
+        help="0으로 두면 진행현황='완료'인 기사 수로 자동 계산됩니다.")
+
+    st.markdown("---")
+
+    if st.button("📊 데이터 불러오기 + 보고서 생성", type="primary", use_container_width=True):
+        with st.spinner("경쟁사 시트 불러오는 중..."):
+            comp_sheet = get_hamsoa_sheet(comp_sheet_name)
+            if comp_sheet is None:
+                st.error(f"'{comp_sheet_name}' 시트를 찾을 수 없습니다. 탭 이름을 확인해주세요.")
+                st.stop()
+            competitor_records, meta = parse_competitor_sheet(comp_sheet)
+            st.success(f"✅ 경쟁사 기사 {len(competitor_records)}건 로드 완료")
+
+        with st.spinner("함소아 관리 시트 불러오는 중..."):
+            mgmt_sheet = get_hamsoa_sheet(mgmt_sheet_name)
+            if mgmt_sheet is None:
+                st.error(f"'{mgmt_sheet_name}' 시트를 찾을 수 없습니다. 탭 이름을 확인해주세요.")
+                st.stop()
+            hamsoa_articles, billing_data = parse_hamsoa_sheet(mgmt_sheet)
+            st.success(f"✅ 함소아 기사 {len(hamsoa_articles)}건, 정산 {len(billing_data)}건 로드 완료")
+
+        completed = [a for a in hamsoa_articles
+                     if '완료' in str(a.get('진행 현황', a.get('진행현황', '')))]
+        hamsoa_count = hamsoa_manual if hamsoa_manual > 0 else len(completed)
+
+        with st.expander("📋 경쟁사 데이터 미리보기", expanded=False):
+            if competitor_records:
+                st.dataframe(pd.DataFrame(competitor_records).head(15))
+                hosp_cnt = meta.get('hospital_counts', {})
+                if hosp_cnt:
+                    st.markdown("**병원별 건수:**")
+                    st.write(hosp_cnt)
+            else:
+                st.warning("⚠️ 경쟁사 데이터가 없습니다. A열에 번호가 입력되어 있는지 확인해주세요.")
+
+        with st.expander("📋 함소아 기사 미리보기", expanded=False):
+            if hamsoa_articles:
+                st.dataframe(pd.DataFrame(hamsoa_articles))
+            else:
+                st.warning("⚠️ 함소아 기사 데이터가 없습니다.")
+
+        with st.expander("💰 정산 데이터 미리보기", expanded=False):
+            if billing_data:
+                st.dataframe(pd.DataFrame(billing_data))
+            else:
+                st.warning("⚠️ 정산 데이터가 없습니다.")
+
+        with st.spinner("PPT 생성 중... (약 10~20초)"):
+            try:
+                ppt_buf = generate_hamsoa_ppt(
+                    competitor_records, meta,
+                    hamsoa_articles, billing_data,
+                    report_date, report_month, hamsoa_count
+                )
+                st.success("✅ PPT 생성 완료!")
+                st.balloons()
+
+                fname = f"함소아한의원_보고서_{datetime.now().strftime('%Y%m%d')}.pptx"
+                st.download_button(
+                    label="⬇️ PPT 다운로드",
+                    data=ppt_buf,
+                    file_name=fname,
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    use_container_width=True,
+                    type="primary"
+                )
+            except Exception as e:
+                st.error(f"❌ PPT 생성 실패: {e}")
+                st.info("💡 python-pptx와 matplotlib이 설치되어 있는지 확인해주세요. requirements.txt에 추가 후 재배포하세요.")

@@ -6,3 +6,5 @@ pandas
 openpyxl
 reportlab
 Pillow
+python-pptx
+matplotlib
