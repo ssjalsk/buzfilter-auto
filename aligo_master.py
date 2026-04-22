@@ -93,64 +93,70 @@ def split_mixed_tokens(text):
 def find_top_candidates(raw, calc_df, product_col, top_n=5):
     """
     3단계 매칭:
-    1단계 — 브랜드 하드 필터 (스프레드시트 브랜드 목록 기준으로 확정 필터링)
-    2단계 — 브랜드 내 키워드 점수화 + 경쟁 변종 패널티
-    3단계 — 명확한 1위 존재 시 AI 없이 자동 확정, 아니면 top_n 반환
+    1단계 - 브랜드 하드 필터 (브랜드명 첫줄만 비교, \n 포함 브랜드 대응)
+    2단계 - 필터 시리즈/제품명 키워드 점수화 + 경쟁 변종 패널티
+    3단계 - 명확한 1위 존재 시 AI 없이 자동 확정, 아니면 top_n 반환
     """
     query_no_qty = re.split(r'\s*/\s*\d+', raw)[0]
     full_query_norm = normalize_for_match(query_no_qty)
     query_tokens = split_mixed_tokens(query_no_qty)
 
-    # ── 1단계: 브랜드 하드 필터 ──────────────────────────────────────────
-    # 스프레드시트 브랜드 목록에서 발주서에 포함된 브랜드를 찾아 그 브랜드만 남김
+    # 브랜드명에 '\n' 있는 경우(예: '쿠쿠\n공기청정기 필터') 첫 줄만 사용
+    def brand_short(b):
+        return normalize_for_match(str(b).split('\n')[0])
+
+    # 1단계: 브랜드 하드 필터 — 가장 긴 매칭 브랜드 우선
     matched_brand = None
+    best_len = 0
     for brand in calc_df['브랜드'].dropna().unique():
-        bn = normalize_for_match(str(brand))
-        if len(bn) >= 2 and bn in full_query_norm:
+        bn = brand_short(brand)
+        if len(bn) >= 2 and bn in full_query_norm and len(bn) > best_len:
             matched_brand = brand
-            break
+            best_len = len(bn)
 
     if matched_brand:
-        matched_bn = normalize_for_match(str(matched_brand))
-        search_df = calc_df[calc_df['브랜드'].apply(
-            lambda x: normalize_for_match(str(x)) == matched_bn
-        )]
+        mb_short = brand_short(matched_brand)
+        search_df = calc_df[calc_df['브랜드'].apply(lambda x: brand_short(x) == mb_short)]
         if len(search_df) == 0:
-            search_df = calc_df  # 브랜드 필터 결과 없으면 전체 폴백
+            search_df = calc_df
     else:
         search_df = calc_df
 
-    # 브랜드 내 상품이 1개면 바로 반환 (다이슨 등 단일 상품 브랜드)
     if len(search_df) == 1:
         return search_df
 
-    # ── 2단계: 브랜드 내 키워드 점수화 ──────────────────────────────────
+    # '필터 시리즈' 컬럼 감지 (모델 구분자 핵심 컬럼)
+    series_col = '필터 시리즈' if '필터 시리즈' in calc_df.columns else ''
+
+    # 2단계: 키워드 점수화
     scored = []
     for idx, row in search_df.iterrows():
+        series_n = normalize_for_match(str(row.get(series_col, ''))) if series_col else ''
         product_n = normalize_for_match(str(row.get('제품명', '')))
         code_n = normalize_for_match(str(row.get(product_col, '')))
+        combined_n = series_n + '|' + product_n
 
         score = 0
-
-        # 쿼리 토큰 → 제품명/코드 매칭 (길이 가중치)
         for tok in query_tokens:
             if len(tok) < 2:
                 continue
-            if tok in product_n or tok in code_n:
+            if tok in series_n:
+                score += 10 + len(tok) * 4  # 시리즈 가중치 높음
+            elif tok in product_n or tok in code_n:
                 score += 5 + len(tok) * 3
 
-        # 경쟁 변종 패널티: X툴≠Y툴, 3벌≠5벌, DH≠일반 등
+        # 경쟁 변종 패널티: X툴≠Y툴, 3벌≠5벌 등
         for q_tok in query_tokens:
-            m = re.match(r'^([a-z]+)([가-힣]{1,3})$', q_tok)
+            m = re.match(r'^([a-z]+)([가-힣]{1,4})$', q_tok)
             if m:
                 kr_suffix = m.group(2)
-                for competitor in re.findall(r'[a-z]+' + kr_suffix, product_n):
+                for competitor in re.findall(r'[a-z]+' + kr_suffix, combined_n):
                     if competitor != q_tok:
                         score -= 40
-            m2 = re.match(r'^(\d+)([가-힣]{1,3})$', q_tok)
+            m2 = re.match(r'^(\d+)([가-힣]{1,4})$', q_tok)
             if m2:
                 kr_suffix2 = m2.group(2)
-                for competitor in re.findall(r'\d+' + kr_suffix2, product_n):
+                for competitor in re.findall(r'\d+' + kr_suffix2, combined_n):
                     if competitor != q_tok:
                         score -= 40
 
@@ -159,11 +165,10 @@ def find_top_candidates(raw, calc_df, product_col, top_n=5):
 
     scored.sort(reverse=True)
 
-    # 점수 있는 후보가 없으면 브랜드 내 전체를 AI에 넘김 (최대 top_n)
     if not scored:
         return search_df.head(top_n)
 
-    # ── 3단계: 명확한 1위 자동 확정 ─────────────────────────────────────
+    # 3단계: 명확한 1위 자동 확정
     if len(scored) == 1:
         return search_df.loc[[scored[0][1]]]
     if scored[0][0] >= 20 and scored[0][0] >= scored[1][0] * 1.7:
@@ -171,6 +176,7 @@ def find_top_candidates(raw, calc_df, product_col, top_n=5):
 
     top_idx = [idx for _, idx in scored[:top_n]]
     return search_df.loc[top_idx]
+
 
 def generate_quote_pdf(quote_data, stamp_path=None):
     from reportlab.lib.pagesizes import A4
@@ -1416,6 +1422,8 @@ if menu == "🏭 버즈필터 발주":
                 if ms is None: st.stop()
                 amd = ms.get_all_values()
                 calc_df = pd.DataFrame(amd[2:], columns=amd[1])
+                # 브랜드 컬럼 ffill: 첫 행에만 브랜드 있고 나머지 빈칸이므로 아래로 채움
+                calc_df['브랜드'] = calc_df['브랜드'].replace('', pd.NA).ffill()
                 calc_df = calc_df[calc_df['제품명'].str.strip() != '']
                 st.success(f"✅ 마진계산기 로드 완료 ({len(calc_df)}개 상품)")
             with st.spinner("AI가 상품 매칭 중..."):
