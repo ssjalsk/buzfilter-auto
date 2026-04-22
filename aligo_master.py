@@ -90,55 +90,56 @@ def split_mixed_tokens(text):
     return [normalize_for_match(t) for t in tokens if len(t) >= 2]
 
 
-def find_top_candidates(raw, calc_df, product_col, top_n=8):
+def find_top_candidates(raw, calc_df, product_col, top_n=5):
     """
-    2단계 사전 필터링:
-    1단계 — 브랜드+모델명을 언어경계 분할 토큰으로 점수화 (X툴/Y툴 구분 포함)
-    2단계 — 상위 top_n개만 추려 AI에 전달
+    3단계 매칭:
+    1단계 — 브랜드 하드 필터 (스프레드시트 브랜드 목록 기준으로 확정 필터링)
+    2단계 — 브랜드 내 키워드 점수화 + 경쟁 변종 패널티
+    3단계 — 명확한 1위 존재 시 AI 없이 자동 확정, 아니면 top_n 반환
     """
     query_no_qty = re.split(r'\s*/\s*\d+', raw)[0]
-    parts = query_no_qty.split(',', 1)
-    brand_model_raw = parts[0].strip()
-    brand_model_norm = normalize_for_match(brand_model_raw)
+    full_query_norm = normalize_for_match(query_no_qty)
+    query_tokens = split_mixed_tokens(query_no_qty)
 
-    # 쉼표 뒤 추가 설명도 토큰에 포함 (예: "에어드레서 3벌용, 3벌" → 3벌도 토큰화)
-    full_query_raw = query_no_qty.strip()
-    query_tokens = split_mixed_tokens(full_query_raw)
+    # ── 1단계: 브랜드 하드 필터 ──────────────────────────────────────────
+    # 스프레드시트 브랜드 목록에서 발주서에 포함된 브랜드를 찾아 그 브랜드만 남김
+    matched_brand = None
+    for brand in calc_df['브랜드'].dropna().unique():
+        bn = normalize_for_match(str(brand))
+        if len(bn) >= 2 and bn in full_query_norm:
+            matched_brand = brand
+            break
 
+    if matched_brand:
+        matched_bn = normalize_for_match(str(matched_brand))
+        search_df = calc_df[calc_df['브랜드'].apply(
+            lambda x: normalize_for_match(str(x)) == matched_bn
+        )]
+        if len(search_df) == 0:
+            search_df = calc_df  # 브랜드 필터 결과 없으면 전체 폴백
+    else:
+        search_df = calc_df
+
+    # 브랜드 내 상품이 1개면 바로 반환 (다이슨 등 단일 상품 브랜드)
+    if len(search_df) == 1:
+        return search_df
+
+    # ── 2단계: 브랜드 내 키워드 점수화 ──────────────────────────────────
     scored = []
-    for idx, row in calc_df.iterrows():
-        brand_n = normalize_for_match(str(row.get('브랜드', '')))
+    for idx, row in search_df.iterrows():
         product_n = normalize_for_match(str(row.get('제품명', '')))
         code_n = normalize_for_match(str(row.get(product_col, '')))
-        combined = brand_n + '|' + product_n + '|' + code_n  # | 구분자로 경계 명확화
 
         score = 0
 
-        # ① 브랜드 매칭 (정방향·부분)
-        if brand_n and brand_n in brand_model_norm:
-            score += 15
-        elif brand_n:
-            for chunk in [brand_n[:4], brand_n[:3], brand_n[:2]]:
-                if len(chunk) >= 2 and chunk in brand_model_norm:
-                    score += 8
-                    break
-
-        # ② 쿼리 토큰이 product/code에 포함되는지 — X툴/Y툴/DH/3벌 등 핵심 구분자
+        # 쿼리 토큰 → 제품명/코드 매칭 (길이 가중치)
         for tok in query_tokens:
             if len(tok) < 2:
                 continue
             if tok in product_n or tok in code_n:
-                # 길이 가중치: 길수록 더 정확한 매칭
                 score += 5 + len(tok) * 3
 
-        # ③ 구성품 키워드 보조
-        if len(parts) > 1:
-            for kw in re.findall(r'[가-힣a-zA-Z]{2,}', parts[1]):
-                if normalize_for_match(kw) in product_n:
-                    score += 2
-
-        # ④ 경쟁 모델 패널티: 쿼리 토큰과 유사하지만 다른 변종이 후보에 있으면 감점
-        # 예) 쿼리='x툴' → 후보에 'y툴' 있으면 -40 / 쿼리='3벌' → 후보에 '5벌' 있으면 -40
+        # 경쟁 변종 패널티: X툴≠Y툴, 3벌≠5벌, DH≠일반 등
         for q_tok in query_tokens:
             m = re.match(r'^([a-z]+)([가-힣]{1,3})$', q_tok)
             if m:
@@ -157,17 +158,19 @@ def find_top_candidates(raw, calc_df, product_col, top_n=8):
             scored.append((score, idx))
 
     scored.sort(reverse=True)
-    if not scored:
-        return calc_df.head(top_n)
 
-    # 1위 점수가 2위의 2배 이상이면 AI 혼선 없이 바로 1개만 반환
-    if len(scored) >= 2 and scored[0][0] >= 20 and scored[0][0] >= scored[1][0] * 2.0:
-        return calc_df.loc[[scored[0][1]]]
+    # 점수 있는 후보가 없으면 브랜드 내 전체를 AI에 넘김 (최대 top_n)
+    if not scored:
+        return search_df.head(top_n)
+
+    # ── 3단계: 명확한 1위 자동 확정 ─────────────────────────────────────
     if len(scored) == 1:
-        return calc_df.loc[[scored[0][1]]]
+        return search_df.loc[[scored[0][1]]]
+    if scored[0][0] >= 20 and scored[0][0] >= scored[1][0] * 1.7:
+        return search_df.loc[[scored[0][1]]]
 
     top_idx = [idx for _, idx in scored[:top_n]]
-    return calc_df.loc[top_idx]
+    return search_df.loc[top_idx]
 
 def generate_quote_pdf(quote_data, stamp_path=None):
     from reportlab.lib.pagesizes import A4
@@ -1444,22 +1447,23 @@ if menu == "🏭 버즈필터 발주":
                         rows_to_add.append([f"{today.year}년", f"{today.month}월", f"{today.day}일", mb, mc, ch, price, qty])
                         continue
 
-                    prompt = f"""너는 발주서 상품과 판매코드를 정밀 매칭하는 전문가야.
+                    prompt = f"""너는 발주서 상품과 판매코드를 매칭하는 전문가야.
 
 [발주서 상품명]
 {raw}
 
-[후보 상품 목록] (아래 중에서만 선택)
+[후보 상품 목록] (이 중에서 반드시 하나 선택)
 {cand_df.to_string(index=False)}
 
 [매칭 우선순위]
-1순위: 브랜드명 + 모델명/시리즈명 정확 일치 (예: X툴≠Y툴, 3벌≠5벌, DH≠일반)
-2순위: 구성품 내용 유사도 (헤파+탈취, 복합필터 등)
-3순위: 수량·장수 일치
+1순위: 모델명/시리즈명 일치 (X툴≠Y툴, 3벌≠5벌, DH시리즈 등)
+2순위: 구성품 유사도 (헤파+탈취, 복합필터 등)
+3순위: 가장 유사한 것
 
-[주의사항]
-- 목록에 없는 코드 임의 생성 절대 금지
-- 유사해도 모델명이 다르면 미등록 처리
+[규칙]
+- 목록 외 코드 생성 금지
+- 목록이 1개면 무조건 그것을 선택
+- 목록에 있는 것 중 가장 유사한 것을 반드시 선택 (미등록은 목록이 비었을 때만)
 - 마크다운·설명 출력 금지
 
 [출력 형식 — 정확히 두 줄만]
