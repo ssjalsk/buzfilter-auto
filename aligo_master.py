@@ -71,56 +71,66 @@ def normalize_for_match(text):
     text = str(text).lower()
     return re.sub(r'[\s\-_·,.]', '', text)
 
+def split_mixed_tokens(text):
+    """
+    언어 경계 분할로 혼합 토큰 추출
+    예) '쿠쿠X툴' → ['쿠쿠', 'X', '툴', 'X툴', '쿠쿠X툴']
+    예) '삼성3벌' → ['삼성', '3', '벌', '3벌', '삼성3벌']
+    → 띄어쓰기 유무 무관하게 동일한 토큰 집합 생성
+    """
+    # 1) 언어·숫자 단위로 분할
+    atoms = re.findall(r'[가-힣]+|[a-zA-Z]+|\d+', text)
+    tokens = set(atoms)
+    # 2) 인접 원자들의 조합도 추가 (2~3개 연속)
+    for i in range(len(atoms)):
+        for j in range(i + 1, min(i + 4, len(atoms) + 1)):
+            combined = ''.join(atoms[i:j])
+            if len(combined) >= 2:
+                tokens.add(combined)
+    return [normalize_for_match(t) for t in tokens if len(t) >= 2]
+
+
 def find_top_candidates(raw, calc_df, product_col, top_n=8):
     """
     2단계 사전 필터링:
-    1단계 — 브랜드+모델명 키워드로 점수화 (공백 정규화 적용)
+    1단계 — 브랜드+모델명을 언어경계 분할 토큰으로 점수화 (X툴/Y툴 구분 포함)
     2단계 — 상위 top_n개만 추려 AI에 전달
     """
-    # 수량 제거 (/ 이후)
     query_no_qty = re.split(r'\s*/\s*\d+', raw)[0]
-    # 구성품 분리 (쉼표 기준)
     parts = query_no_qty.split(',', 1)
     brand_model_raw = parts[0].strip()
     brand_model_norm = normalize_for_match(brand_model_raw)
-    full_norm = normalize_for_match(query_no_qty)
 
-    # 발주서에서 모델번호 패턴 추출 (예: AP-2318D, CFX-D100D, DH시리즈 등)
-    model_tokens = re.findall(r'[a-zA-Z가-힣]+[-]?\d+[a-zA-Z가-힣]*|[a-zA-Z가-힣]*\d+[a-zA-Z가-힣]+', brand_model_raw)
-    model_tokens_norm = [normalize_for_match(t) for t in model_tokens]
+    # 발주서 브랜드·모델 전체 토큰 집합 (X툴, Y툴, DH, 3벌, 5벌 등 모두 포함)
+    query_tokens = split_mixed_tokens(brand_model_raw)
 
     scored = []
     for idx, row in calc_df.iterrows():
         brand_n = normalize_for_match(str(row.get('브랜드', '')))
         product_n = normalize_for_match(str(row.get('제품명', '')))
         code_n = normalize_for_match(str(row.get(product_col, '')))
-        combined = brand_n + product_n + code_n
+        combined = brand_n + '|' + product_n + '|' + code_n  # | 구분자로 경계 명확화
 
         score = 0
 
-        # ① 브랜드 매칭
+        # ① 브랜드 매칭 (정방향·부분)
         if brand_n and brand_n in brand_model_norm:
             score += 15
         elif brand_n:
-            # 브랜드 단어 부분 포함 (예: "쿠쿠공기청정기필터" vs "쿠쿠")
             for chunk in [brand_n[:4], brand_n[:3], brand_n[:2]]:
                 if len(chunk) >= 2 and chunk in brand_model_norm:
                     score += 8
                     break
 
-        # ② 모델번호 강력 매칭 (AP2318D, CFXD100D 등)
-        for tok in model_tokens_norm:
-            if len(tok) >= 3 and tok in combined:
-                score += 30
+        # ② 쿼리 토큰이 product/code에 포함되는지 — X툴/Y툴/DH/3벌 등 핵심 구분자
+        for tok in query_tokens:
+            if len(tok) < 2:
+                continue
+            if tok in product_n or tok in code_n:
+                # 길이 가중치: 길수록 더 정확한 매칭
+                score += 5 + len(tok) * 3
 
-        # ③ 시리즈·시리즈명 키워드 (X툴/Y툴, DH시리즈, 에어드레서 등)
-        series_tokens = re.findall(r'[가-힣a-zA-Z]{2,}', brand_model_raw)
-        for kw in series_tokens:
-            kw_n = normalize_for_match(kw)
-            if len(kw_n) >= 2 and kw_n in combined:
-                score += 8
-
-        # ④ 구성품 키워드 보조 매칭
+        # ③ 구성품 키워드 보조
         if len(parts) > 1:
             for kw in re.findall(r'[가-힣a-zA-Z]{2,}', parts[1]):
                 if normalize_for_match(kw) in product_n:
