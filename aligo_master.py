@@ -58,15 +58,82 @@ def insert_row_safe(sheet, start_row, rows_data):
 
 def extract_qty_from_text(text):
     text = str(text)
-    # "/ N단위" 형식 우선 (기존 발주서 표준)
     m = re.search(r'/\s*(\d+)\s*(세트|개|박스|팩|장|묶음)', text)
     if m:
         return int(m.group(1))
-    # "/" 없이 단독 "N세트/박스/팩" 형식
     m = re.search(r'(\d+)\s*(세트|박스|팩|묶음)', text)
     if m:
         return int(m.group(1))
     return 1
+
+def normalize_for_match(text):
+    """매칭용 정규화: 소문자 + 공백·특수문자 제거 (띄어쓰기 유무 무관하게 비교)"""
+    text = str(text).lower()
+    return re.sub(r'[\s\-_·,.]', '', text)
+
+def find_top_candidates(raw, calc_df, product_col, top_n=8):
+    """
+    2단계 사전 필터링:
+    1단계 — 브랜드+모델명 키워드로 점수화 (공백 정규화 적용)
+    2단계 — 상위 top_n개만 추려 AI에 전달
+    """
+    # 수량 제거 (/ 이후)
+    query_no_qty = re.split(r'\s*/\s*\d+', raw)[0]
+    # 구성품 분리 (쉼표 기준)
+    parts = query_no_qty.split(',', 1)
+    brand_model_raw = parts[0].strip()
+    brand_model_norm = normalize_for_match(brand_model_raw)
+    full_norm = normalize_for_match(query_no_qty)
+
+    # 발주서에서 모델번호 패턴 추출 (예: AP-2318D, CFX-D100D, DH시리즈 등)
+    model_tokens = re.findall(r'[a-zA-Z가-힣]+[-]?\d+[a-zA-Z가-힣]*|[a-zA-Z가-힣]*\d+[a-zA-Z가-힣]+', brand_model_raw)
+    model_tokens_norm = [normalize_for_match(t) for t in model_tokens]
+
+    scored = []
+    for idx, row in calc_df.iterrows():
+        brand_n = normalize_for_match(str(row.get('브랜드', '')))
+        product_n = normalize_for_match(str(row.get('제품명', '')))
+        code_n = normalize_for_match(str(row.get(product_col, '')))
+        combined = brand_n + product_n + code_n
+
+        score = 0
+
+        # ① 브랜드 매칭
+        if brand_n and brand_n in brand_model_norm:
+            score += 15
+        elif brand_n:
+            # 브랜드 단어 부분 포함 (예: "쿠쿠공기청정기필터" vs "쿠쿠")
+            for chunk in [brand_n[:4], brand_n[:3], brand_n[:2]]:
+                if len(chunk) >= 2 and chunk in brand_model_norm:
+                    score += 8
+                    break
+
+        # ② 모델번호 강력 매칭 (AP2318D, CFXD100D 등)
+        for tok in model_tokens_norm:
+            if len(tok) >= 3 and tok in combined:
+                score += 30
+
+        # ③ 시리즈·시리즈명 키워드 (X툴/Y툴, DH시리즈, 에어드레서 등)
+        series_tokens = re.findall(r'[가-힣a-zA-Z]{2,}', brand_model_raw)
+        for kw in series_tokens:
+            kw_n = normalize_for_match(kw)
+            if len(kw_n) >= 2 and kw_n in combined:
+                score += 8
+
+        # ④ 구성품 키워드 보조 매칭
+        if len(parts) > 1:
+            for kw in re.findall(r'[가-힣a-zA-Z]{2,}', parts[1]):
+                if normalize_for_match(kw) in product_n:
+                    score += 2
+
+        if score > 0:
+            scored.append((score, idx))
+
+    scored.sort(reverse=True)
+    if not scored:
+        return calc_df.head(top_n)
+    top_idx = [idx for _, idx in scored[:top_n]]
+    return calc_df.loc[top_idx]
 
 def generate_quote_pdf(quote_data, stamp_path=None):
     from reportlab.lib.pagesizes import A4
@@ -1329,23 +1396,33 @@ if menu == "🏭 버즈필터 발주":
                         price = int(float(price_raw)) if price_raw else 0
                     except (ValueError, TypeError):
                         price = 0
-                    prompt = f"""너는 발주서 상품과 판매 코드를 매칭하는 전문가야.
+
+                    # 사전 필터링: 전체 목록 대신 브랜드·모델 기반 상위 후보만 추출
+                    candidates = find_top_candidates(raw, calc_df, product_col, top_n=8)
+                    cand_df = candidates[['브랜드', '제품명', product_col]].copy()
+                    cand_df = cand_df.rename(columns={product_col: '상품코드'})
+
+                    prompt = f"""너는 발주서 상품과 판매코드를 정밀 매칭하는 전문가야.
 
 [발주서 상품명]
 {raw}
 
-[판매 상품 목록] (브랜드 / 제품명 / 상품코드)
-{display_df.to_string(index=False)}
+[후보 상품 목록] (아래 중에서만 선택)
+{cand_df.to_string(index=False)}
 
-[매칭 규칙]
-1. 브랜드명, 시리즈명, 제품 구성이 가장 유사한 것 1개만 선택
-2. 반드시 위 목록에 있는 상품코드만 사용 (임의 생성 금지)
-3. 마크다운·설명 절대 금지
-4. 확실하지 않으면 미등록
+[매칭 우선순위]
+1순위: 브랜드명 + 모델명/시리즈명 정확 일치 (예: X툴≠Y툴, 3벌≠5벌, DH≠일반)
+2순위: 구성품 내용 유사도 (헤파+탈취, 복합필터 등)
+3순위: 수량·장수 일치
 
-[출력 형식 — 아래 두 줄만 출력]
-상품코드: LAP01
-브랜드: LG 공기청정기 필터"""
+[주의사항]
+- 목록에 없는 코드 임의 생성 절대 금지
+- 유사해도 모델명이 다르면 미등록 처리
+- 마크다운·설명 출력 금지
+
+[출력 형식 — 정확히 두 줄만]
+상품코드: (목록의 코드)
+브랜드: (목록의 브랜드)"""
                     resp = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=200,
                                                   messages=[{"role": "user", "content": prompt}])
                     rt = resp.content[0].text.strip()
