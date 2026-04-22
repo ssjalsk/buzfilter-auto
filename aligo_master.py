@@ -136,12 +136,35 @@ def find_top_candidates(raw, calc_df, product_col, top_n=8):
                 if normalize_for_match(kw) in product_n:
                     score += 2
 
+        # ④ 경쟁 모델 패널티: 쿼리 토큰과 유사하지만 다른 변종이 후보에 있으면 감점
+        # 예) 쿼리='x툴' → 후보에 'y툴' 있으면 -40 / 쿼리='3벌' → 후보에 '5벌' 있으면 -40
+        for q_tok in query_tokens:
+            m = re.match(r'^([a-z]+)([가-힣]{1,3})$', q_tok)
+            if m:
+                kr_suffix = m.group(2)
+                for competitor in re.findall(r'[a-z]+' + kr_suffix, product_n):
+                    if competitor != q_tok:
+                        score -= 40
+            m2 = re.match(r'^(\d+)([가-힣]{1,3})$', q_tok)
+            if m2:
+                kr_suffix2 = m2.group(2)
+                for competitor in re.findall(r'\d+' + kr_suffix2, product_n):
+                    if competitor != q_tok:
+                        score -= 40
+
         if score > 0:
             scored.append((score, idx))
 
     scored.sort(reverse=True)
     if not scored:
         return calc_df.head(top_n)
+
+    # 1위 점수가 2위의 2배 이상이면 AI 혼선 없이 바로 1개만 반환
+    if len(scored) >= 2 and scored[0][0] >= 20 and scored[0][0] >= scored[1][0] * 2.0:
+        return calc_df.loc[[scored[0][1]]]
+    if len(scored) == 1:
+        return calc_df.loc[[scored[0][1]]]
+
     top_idx = [idx for _, idx in scored[:top_n]]
     return calc_df.loc[top_idx]
 
@@ -1408,7 +1431,7 @@ if menu == "🏭 버즈필터 발주":
                         price = 0
 
                     # 사전 필터링: 전체 목록 대신 브랜드·모델 기반 상위 후보만 추출
-                    candidates = find_top_candidates(raw, calc_df, product_col, top_n=8)
+                    candidates = find_top_candidates(raw, calc_df, product_col, top_n=5)
                     cand_df = candidates[['브랜드', '제품명', product_col]].copy()
                     cand_df = cand_df.rename(columns={product_col: '상품코드'})
 
