@@ -57,9 +57,15 @@ def insert_row_safe(sheet, start_row, rows_data):
     sheet.batch_update(updates, value_input_option='USER_ENTERED')
 
 def extract_qty_from_text(text):
-    match = re.search(r'/\s*(\d+)\s*(세트|개)', str(text))
-    if match:
-        return int(match.group(1))
+    text = str(text)
+    # "/ N단위" 형식 우선 (기존 발주서 표준)
+    m = re.search(r'/\s*(\d+)\s*(세트|개|박스|팩|장|묶음)', text)
+    if m:
+        return int(m.group(1))
+    # "/" 없이 단독 "N세트/박스/팩" 형식
+    m = re.search(r'(\d+)\s*(세트|박스|팩|묶음)', text)
+    if m:
+        return int(m.group(1))
     return 1
 
 def generate_quote_pdf(quote_data, stamp_path=None):
@@ -383,19 +389,23 @@ def parse_match_response(text):
     mc, mb = "미등록", "미등록"
     for line in text.split('\n'):
         line = line.strip()
-        if re.search(r'상품코드\s*(?:표)?\s*:', line):
-            val = re.split(r'상품코드\s*(?:표)?\s*:', line, maxsplit=1)[1]
-            val = re.sub(r'[*_`]', '', val).strip()
-            if val and val != '미등록':
+        if not line or ':' not in line:
+            continue
+        # 상품코드 파싱 — "상품코드" 포함 줄에서 콜론 뒤 값 추출
+        if '상품코드' in line:
+            val = line.split(':', 1)[1]
+            val = re.sub(r'[*_`\[\]()\s]', '', val).strip()
+            if val and val not in ('미등록', '없음', ''):
                 mc = val
-            elif val == '미등록':
+            elif val in ('미등록', '없음'):
                 mc = '미등록'
-        if re.search(r'브랜드\s*:', line):
-            val = re.split(r'브랜드\s*:', line, maxsplit=1)[1]
-            val = re.sub(r'[*_`]', '', val).strip()
-            if val and val != '미등록':
+        # 브랜드 파싱 — elif로 같은 줄 중복 처리 방지
+        elif '브랜드' in line:
+            val = line.split(':', 1)[1]
+            val = re.sub(r'[*_`\[\]]', '', val).strip()
+            if val and val not in ('미등록', '없음', ''):
                 mb = val
-            elif val == '미등록':
+            elif val in ('미등록', '없음'):
                 mb = '미등록'
     return mc, mb
 
@@ -1313,21 +1323,30 @@ if menu == "🏭 버즈필터 발주":
                 for idx, row in df.iterrows():
                     raw = str(row.get('상품명+옵션+개수', ''))
                     qty = extract_qty_from_text(raw)
-                    price = int(row.get('가격', 0))
                     ch = str(row.get('판매처', '쿠팡'))
-                    prompt = f"""너는 상품 매칭 전문가야.
-발주서 상품명: {raw}
-상품 리스트 (브랜드 / 제품명 / 상품코드):
+                    price_raw = str(row.get('가격', '0')).replace(',', '').replace('원', '').strip()
+                    try:
+                        price = int(float(price_raw)) if price_raw else 0
+                    except (ValueError, TypeError):
+                        price = 0
+                    prompt = f"""너는 발주서 상품과 판매 코드를 매칭하는 전문가야.
+
+[발주서 상품명]
+{raw}
+
+[판매 상품 목록] (브랜드 / 제품명 / 상품코드)
 {display_df.to_string(index=False)}
-규칙:
-1. 브랜드명이나 핵심 키워드가 겹치면 매칭해라
-2. 가장 유사한 것 1개만 선택해라
-3. 마크다운 절대 사용 금지
-4. 정말 모르겠으면 미등록
-반드시 아래 형식으로만 답해줘:
-상품코드: [값]
-브랜드: [값]"""
-                    resp = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=150,
+
+[매칭 규칙]
+1. 브랜드명, 시리즈명, 제품 구성이 가장 유사한 것 1개만 선택
+2. 반드시 위 목록에 있는 상품코드만 사용 (임의 생성 금지)
+3. 마크다운·설명 절대 금지
+4. 확실하지 않으면 미등록
+
+[출력 형식 — 아래 두 줄만 출력]
+상품코드: LAP01
+브랜드: LG 공기청정기 필터"""
+                    resp = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=200,
                                                   messages=[{"role": "user", "content": prompt}])
                     rt = resp.content[0].text.strip()
                     mc, mb = parse_match_response(rt)
