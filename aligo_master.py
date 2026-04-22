@@ -101,8 +101,9 @@ def find_top_candidates(raw, calc_df, product_col, top_n=8):
     brand_model_raw = parts[0].strip()
     brand_model_norm = normalize_for_match(brand_model_raw)
 
-    # 발주서 브랜드·모델 전체 토큰 집합 (X툴, Y툴, DH, 3벌, 5벌 등 모두 포함)
-    query_tokens = split_mixed_tokens(brand_model_raw)
+    # 쉼표 뒤 추가 설명도 토큰에 포함 (예: "에어드레서 3벌용, 3벌" → 3벌도 토큰화)
+    full_query_raw = query_no_qty.strip()
+    query_tokens = split_mixed_tokens(full_query_raw)
 
     scored = []
     for idx, row in calc_df.iterrows():
@@ -1434,6 +1435,14 @@ if menu == "🏭 버즈필터 발주":
                     candidates = find_top_candidates(raw, calc_df, product_col, top_n=5)
                     cand_df = candidates[['브랜드', '제품명', product_col]].copy()
                     cand_df = cand_df.rename(columns={product_col: '상품코드'})
+
+                    # 후보 1개면 AI 없이 바로 확정 (다이슨 등 단일 상품 브랜드)
+                    if len(cand_df) == 1:
+                        mc = str(cand_df.iloc[0]['상품코드']).strip()
+                        mb = str(cand_df.iloc[0]['브랜드']).strip()
+                        match_results.append({'상품명': raw, '매칭 브랜드': mb, '매칭 코드': mc, '판매처': ch, '가격': price, '수량(파싱)': qty})
+                        rows_to_add.append([f"{today.year}년", f"{today.month}월", f"{today.day}일", mb, mc, ch, price, qty])
+                        continue
 
                     prompt = f"""너는 발주서 상품과 판매코드를 정밀 매칭하는 전문가야.
 
