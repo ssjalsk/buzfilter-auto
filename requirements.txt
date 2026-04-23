@@ -8,3 +8,4 @@ reportlab
 Pillow
 python-pptx
 matplotlib
+msoffcrypto-tool
