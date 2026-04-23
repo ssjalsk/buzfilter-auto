@@ -1430,11 +1430,24 @@ if menu == "🏭 버즈필터 발주":
                 today = datetime.now()
                 rows_to_add, match_results = [], []
                 product_col = '상품코드 표' if '상품코드 표' in calc_df.columns else '상품코드'
-                display_df = calc_df[['브랜드', '제품명', product_col]].copy()
-                display_df = display_df.rename(columns={product_col: '상품코드'})
+
+                # 전체 판매자코드 목록을 AI 프롬프트용으로 빌드 (루프 전 1회)
+                catalog_lines = []
+                for _, r in calc_df.iterrows():
+                    brand = str(r.get('브랜드', '')).split('\n')[0].strip()
+                    series = str(r.get('필터 시리즈', '')).strip()
+                    product = str(r.get('제품명', '')).strip()
+                    code = str(r.get(product_col, '')).strip()
+                    if code and product:
+                        catalog_lines.append(f"{code} | {brand} | {series} | {product}")
+                catalog_str = '\n'.join(catalog_lines)
+
+                qty_fail_items = []
                 for idx, row in df.iterrows():
                     raw = str(row.get('상품명+옵션+개수', ''))
                     qty = extract_qty_from_text(raw)
+                    if '/' not in raw:
+                        qty_fail_items.append(raw)
                     ch = str(row.get('판매처', '쿠팡'))
                     price_raw = str(row.get('가격', '0')).replace(',', '').replace('원', '').strip()
                     try:
@@ -1442,58 +1455,51 @@ if menu == "🏭 버즈필터 발주":
                     except (ValueError, TypeError):
                         price = 0
 
-                    # 사전 필터링: 전체 목록 대신 브랜드·모델 기반 상위 후보만 추출
-                    candidates = find_top_candidates(raw, calc_df, product_col, top_n=5)
-                    cand_df = candidates[['브랜드', '제품명', product_col]].copy()
-                    cand_df = cand_df.rename(columns={product_col: '상품코드'})
+                    prompt = f"""발주서 항목을 아래 판매자코드 전체 목록에서 찾아 매칭해줘.
 
-                    # 후보 1개면 AI 없이 바로 확정 (다이슨 등 단일 상품 브랜드)
-                    if len(cand_df) == 1:
-                        mc = str(cand_df.iloc[0]['상품코드']).strip()
-                        mb = str(cand_df.iloc[0]['브랜드']).strip()
-                        match_results.append({'상품명': raw, '매칭 브랜드': mb, '매칭 코드': mc, '판매처': ch, '가격': price, '수량(파싱)': qty})
-                        rows_to_add.append([f"{today.year}년", f"{today.month}월", f"{today.day}일", mb, mc, ch, price, qty])
-                        continue
+[판매자코드 전체 목록]
+코드 | 브랜드 | 필터시리즈 | 제품명
+{catalog_str}
 
-                    prompt = f"""너는 발주서 상품과 판매코드를 매칭하는 전문가야.
-
-[발주서 상품명]
+[발주서 항목]
 {raw}
 
-[후보 상품 목록] (이 중에서 반드시 하나 선택)
-{cand_df.to_string(index=False)}
-
 [매칭 우선순위]
-1순위: 모델명/시리즈명 일치 (X툴≠Y툴, 3벌≠5벌, DH시리즈 등)
-2순위: 구성품 유사도 (헤파+탈취, 복합필터 등)
+1순위: 필터시리즈 일치 (X툴≠Y툴, 3벌용≠5벌용, DH시리즈≠CDH시리즈 등)
+2순위: 구성품 유사도 (헤파+탈취, 복합필터, 기능성 개수 등)
 3순위: 가장 유사한 것
 
 [규칙]
-- 목록 외 코드 생성 금지
-- 목록이 1개면 무조건 그것을 선택
-- 목록에 있는 것 중 가장 유사한 것을 반드시 선택 (미등록은 목록이 비었을 때만)
-- 마크다운·설명 출력 금지
+- 위 목록에서 반드시 하나 선택 (새 코드 생성 금지)
+- 목록에 없을 때만: 상품코드: 미등록 / 브랜드: 미등록
+- 마크다운/설명 출력 금지
 
 [출력 형식 — 정확히 두 줄만]
 상품코드: (목록의 코드)
 브랜드: (목록의 브랜드)"""
-                    resp = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=200,
-                                                  messages=[{"role": "user", "content": prompt}])
+                    resp = client.messages.create(
+                        model="claude-haiku-4-5-20251001", max_tokens=100,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
                     rt = resp.content[0].text.strip()
                     mc, mb = parse_match_response(rt)
+                    mb = str(mb).split('\n')[0].strip()
                     match_results.append({'상품명': raw, '매칭 브랜드': mb, '매칭 코드': mc, '판매처': ch, '가격': price, '수량(파싱)': qty})
                     rows_to_add.append([f"{today.year}년", f"{today.month}월", f"{today.day}일", mb, mc, ch, price, qty])
                 st.session_state['rows_to_add'] = rows_to_add
                 st.session_state['match_results'] = match_results
+                st.session_state['qty_fail_items'] = qty_fail_items
                 st.session_state['ready_to_insert'] = True
             st.success("✅ AI 매칭 완료!")
         if st.session_state.get('ready_to_insert'):
             rdf = pd.DataFrame(st.session_state['match_results'])
             st.write("🔍 AI 매칭 결과")
             st.dataframe(rdf)
-            no_slash = rdf[~rdf['상품명'].str.contains('/', na=False)]
-            if len(no_slash) > 0:
-                st.warning(f"⚠️ {len(no_slash)}건 수량 파싱 불가 → 수량 1로 처리")
+            qty_fails = st.session_state.get('qty_fail_items', [])
+            if qty_fails:
+                with st.expander(f"⚠️ {len(qty_fails)}건 수량 파싱 불가 → 수량 1로 처리 (클릭해서 확인)"):
+                    for item in qty_fails:
+                        st.write(f"• {item}")
             unm = rdf[rdf['매칭 코드'] == '미등록']
             if len(unm) > 0:
                 st.warning(f"⚠️ {len(unm)}건 상품 매칭 실패")
