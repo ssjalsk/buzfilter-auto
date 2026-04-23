@@ -1396,6 +1396,7 @@ with st.sidebar:
     st.markdown("---")
     menu = st.radio("", options=[
         "🏭 버즈필터 발주",
+        "🚚 위탁 발주",
         "✍️ 리뷰 생성",
         "📝 리뷰 입력",
         "📄 견적서 생성",
@@ -1979,3 +1980,133 @@ elif menu == "📊 함소아 보고서":
                 st.dataframe(pd.DataFrame(hamsoa_articles))
             else:
                 st.warning("⚠️ 함소아 기사 데이터 없음")
+
+elif menu == "🚚 위탁 발주":
+    import io as _io, re as _re
+    st.title("\U0001f69a 위탁 발주서 자동 생성")
+    st.subheader("쿠팡 / 스마트스토어 주문 엑셀을 업로드하면 발주서를 자동으로 만들어 드립니다.")
+
+    COLS_OUT = [
+        "수령자명", "전화번호1", "전화번호2", "수령주소",
+        "상품명+옵션+개수 (최대한 요약해서 작성 부탁드립니다)",
+        "배송요청사항", "가격", "판매처"
+    ]
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### \U0001f6d2 쿠팡 주문 엑셀")
+        cp_file = st.file_uploader("쿠팡 발주 엑셀 업로드", type=["xlsx", "xls"], key="cp_upload")
+    with col2:
+        st.markdown("#### \U0001f3ea 스마트스토어 주문 엑셀")
+        ss_file = st.file_uploader("스마트스토어 발주 엑셀 업로드", type=["xlsx", "xls"], key="ss_upload")
+        ss_pw = st.text_input("암호 (없으면 비워두세요)", type="password", key="ss_pw")
+
+    if st.button("\U0001f4cb 발주서 생성", type="primary"):
+        if not cp_file and not ss_file:
+            st.warning("\u26a0\ufe0f 쿠팡 또는 스마트스토어 파일을 하나 이상 업로드해주세요.")
+        else:
+            all_rows = []
+
+            # 쿠팡 파싱
+            if cp_file:
+                try:
+                    df_cp = pd.read_excel(cp_file, header=0, dtype=str)
+                    cnt = 0
+                    for _, row in df_cp.iterrows():
+                        product = str(row.get("등록상품명", "") or "").strip()
+                        option  = str(row.get("등록옵션명", "") or "").strip()
+                        qty_s   = str(row.get("구매수(수량)", "1") or "1").strip()
+                        qty = int(float(qty_s)) if qty_s.replace(".", "").isdigit() else 1
+                        option_clean = _re.sub(r"^\d+개\s*", "", option).strip()
+                        pstr = f"{product}, {option_clean} / {qty}개" if option_clean else f"{product} / {qty}개"
+                        tel1 = str(row.get("수취인전화번호", "") or "").strip()
+                        tel2 = str(row.get("구매자전화번호", "") or "").strip()
+                        price_s = str(row.get("결제액", "0") or "0").replace(",", "").strip()
+                        price = int(float(price_s)) if price_s.replace(".", "").isdigit() else 0
+                        all_rows.append({
+                            "수령자명": str(row.get("수취인이름", "") or "").strip(),
+                            "전화번호1": tel1,
+                            "전화번호2": tel2 if tel2 != tel1 else "",
+                            "수령주소": str(row.get("수취인 주소", "") or "").strip(),
+                            "상품명+옵션+개수 (최대한 요약해서 작성 부탁드립니다)": pstr,
+                            "배송요청사항": str(row.get("배송메세지", "") or "").strip(),
+                            "가격": price,
+                            "판매처": "쿠팡"
+                        })
+                        cnt += 1
+                    st.success(f"\u2705 쿠팡 {cnt}건 파싱 완료")
+                except Exception as e:
+                    st.error(f"\u274c 쿠팡 파싱 오류: {e}")
+
+            # 스마트스토어 파싱
+            if ss_file:
+                try:
+                    file_bytes = ss_file.read()
+                    if ss_pw:
+                        import msoffcrypto as _msoff
+                        of = _msoff.OfficeFile(_io.BytesIO(file_bytes))
+                        of.load_key(password=ss_pw)
+                        target = _io.BytesIO()
+                        of.decrypt(target)
+                        target.seek(0)
+                    else:
+                        target = _io.BytesIO(file_bytes)
+                    df_ss = pd.read_excel(target, header=1, dtype=str)
+                    if "판매자 상품코드" not in df_ss.columns:
+                        target.seek(0)
+                        df_ss = pd.read_excel(target, header=0, dtype=str)
+                    cnt = 0
+                    for _, row in df_ss.iterrows():
+                        code  = str(row.get("판매자 상품코드", "") or "").strip()
+                        opt   = str(row.get("옵션정보", "") or "").strip()
+                        qty_s = str(row.get("수량", "1") or "1").strip()
+                        qty = int(float(qty_s)) if qty_s.replace(".", "").isdigit() else 1
+                        if ": " in opt:
+                            opt = opt.split(": ", 1)[1].strip()
+                        if opt in ("nan", "None", ""):
+                            opt = ""
+                        pstr = f"{code}, {opt} / {qty}개" if opt else f"{code} / {qty}개"
+                        addr1 = str(row.get("기본배송지", "") or "").strip()
+                        addr2 = str(row.get("상세배송지", "") or "").strip()
+                        address = f"{addr1} {addr2}".strip()
+                        price_s = str(row.get("상품가격", "0") or "0").replace(",", "").strip()
+                        price = int(float(price_s)) if price_s.replace(".", "").isdigit() else 0
+                        tel2 = str(row.get("수취인연락처2", "") or "").strip()
+                        if tel2 in ("nan", "None"): tel2 = ""
+                        all_rows.append({
+                            "수령자명": str(row.get("수취인명", "") or "").strip(),
+                            "전화번호1": str(row.get("수취인연락처1", "") or "").strip(),
+                            "전화번호2": tel2,
+                            "수령주소": address,
+                            "상품명+옵션+개수 (최대한 요약해서 작성 부탁드립니다)": pstr,
+                            "배송요청사항": str(row.get("배송메세지", "") or "").strip(),
+                            "가격": price,
+                            "판매처": "스마트스토어"
+                        })
+                        cnt += 1
+                    st.success(f"\u2705 스마트스토어 {cnt}건 파싱 완료")
+                except Exception as e:
+                    st.error(f"\u274c 스마트스토어 파싱 오류: {e}")
+
+            if all_rows:
+                st.session_state["위탁발주_df"] = pd.DataFrame(all_rows, columns=COLS_OUT)
+            else:
+                st.warning("\u26a0\ufe0f 파싱된 데이터가 없습니다. 파일 형식을 확인해주세요.")
+
+    # 결과 미리보기 + 다운로드
+    if st.session_state.get("위탁발주_df") is not None:
+        result_df = st.session_state["위탁발주_df"]
+        st.markdown(f"### \U0001f4cb 발주서 미리보기 — 총 {len(result_df)}건")
+        st.dataframe(result_df, use_container_width=True)
+        today = datetime.now()
+        fname = f"발주서_버즈필터 {today.month}월 {today.day}일.xlsx"
+        buf = _io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            result_df.to_excel(writer, index=False, sheet_name="발주발송관리")
+        st.download_button(
+            label=f"\u2b07\ufe0f {fname} 다운로드",
+            data=buf.getvalue(),
+            file_name=fname,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary"
+        )
