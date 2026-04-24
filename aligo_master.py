@@ -2069,7 +2069,7 @@ elif menu == "🚚 위탁 발주":
                         addr1 = str(row.get("기본배송지", "") or "").strip()
                         addr2 = str(row.get("상세배송지", "") or "").strip()
                         address = f"{addr1} {addr2}".strip()
-                        price_s = str(row.get("상품가격", "0") or "0").replace(",", "").strip()
+                        price_s = str(row.get("최종 상품별 주문금액", "0") or "0").replace(",", "").strip()
                         price = int(float(price_s)) if price_s.replace(".", "").isdigit() else 0
                         tel2 = str(row.get("수취인연락처2", "") or "").strip()
                         if tel2 in ("nan", "None"): tel2 = ""
