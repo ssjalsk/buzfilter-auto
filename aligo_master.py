@@ -354,27 +354,60 @@ def parse_reviews(text):
 
 def create_excel(reviews):
     wb = Workbook(); ws = wb.active; ws.title = "리뷰"
-    hf = PatternFill("solid", start_color="FF6B35", end_color="FF6B35")
-    hfont = Font(bold=True, color="FFFFFF", name="Arial", size=11)
-    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    lw = Alignment(horizontal="left", vertical="top", wrap_text=True)
-    thin = Side(style="thin", color="CCCCCC")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    for addr, lbl in {"A1":"번호","B1":"별점","C1":"리뷰 내용"}.items():
-        cell=ws[addr]; cell.value=lbl; cell.fill=hf; cell.font=hfont; cell.alignment=center; cell.border=border
-    ws.column_dimensions["A"].width=8; ws.column_dimensions["B"].width=8; ws.column_dimensions["C"].width=70
-    ws.row_dimensions[1].height=30
-    af = PatternFill("solid", start_color="FFF5F0", end_color="FFF5F0")
-    for i,(num,content) in enumerate(reviews, start=2):
-        rf = af if i%2==0 else None
-        a=ws.cell(row=i,column=1,value=num); a.font=Font(name="Arial",size=10,bold=True); a.alignment=center; a.border=border
-        if rf: a.fill=rf
-        b=ws.cell(row=i,column=2,value=""); b.border=border
-        if rf: b.fill=rf
-        cc=ws.cell(row=i,column=3,value=content); cc.font=Font(name="Arial",size=10); cc.alignment=lw; cc.border=border
-        if rf: cc.fill=rf
-        ws.row_dimensions[i].height=max(40,min(content.count('\n')*18+18,200))
-    out=io.BytesIO(); wb.save(out); out.seek(0); return out
+
+    # ── 스타일 ──
+    green_fill   = PatternFill("solid", start_color="70AD47", end_color="70AD47")
+    h_font       = Font(bold=True, color="FFFFFF", name="맑은 고딕", size=11)
+    red_font     = Font(bold=True, color="FF0000", name="맑은 고딕", size=10)
+    data_font    = Font(name="맑은 고딕", size=10)
+    bold_font    = Font(name="맑은 고딕", size=10, bold=True)
+    center       = Alignment(horizontal="center", vertical="center", wrap_text=False)
+    lw           = Alignment(horizontal="left",   vertical="top",    wrap_text=True)
+    thin         = Side(style="thin", color="BFBFBF")
+    border       = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # ── 헤더 행 (A1:E1) ──
+    for col, name in [(1,"No"),(2,"별점"),(3,"리뷰내용"),(4,"사진"),(5,"상품옵션")]:
+        c = ws.cell(row=1, column=col, value=name)
+        c.fill = green_fill; c.font = h_font; c.alignment = center; c.border = border
+
+    # ── F1 안내문구 (초록 배경 + 빨간 볼드) ──
+    ws.merge_cells("F1:H1")
+    f1 = ws["F1"]
+    f1.value     = "사진은 해당 리뷰에 맞는 넘버로 동일하게 포토파일명을 변경해주세요!"
+    f1.fill      = green_fill
+    f1.font      = red_font
+    f1.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
+
+    # ── 컬럼 너비 ──
+    ws.column_dimensions["A"].width = 6
+    ws.column_dimensions["B"].width = 11
+    ws.column_dimensions["C"].width = 75
+    ws.column_dimensions["D"].width = 14
+    ws.column_dimensions["E"].width = 14
+    ws.column_dimensions["F"].width = 48
+
+    # ── 헤더 행 높이 + AutoFilter ──
+    ws.row_dimensions[1].height = 25
+    ws.auto_filter.ref = "A1:E1"
+
+    # ── 데이터 행 ──
+    for i, (num, content) in enumerate(reviews, start=2):
+        a  = ws.cell(row=i, column=1, value=num)
+        a.font = bold_font; a.alignment = center; a.border = border
+
+        b  = ws.cell(row=i, column=2, value="별점 5점")
+        b.font = data_font; b.alignment = center; b.border = border
+
+        cc = ws.cell(row=i, column=3, value=content)
+        cc.font = data_font; cc.alignment = lw; cc.border = border
+
+        d  = ws.cell(row=i, column=4, value=""); d.border = border
+        e  = ws.cell(row=i, column=5, value=""); e.border = border
+
+        ws.row_dimensions[i].height = max(20, min(content.count('\n') * 15 + 18, 200))
+
+    out = io.BytesIO(); wb.save(out); out.seek(0); return out
 
 def analyze_images_with_claude(client, image_data_list):
     if not image_data_list:
