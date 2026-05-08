@@ -375,7 +375,6 @@ def create_excel(reviews):
     ws.merge_cells("F1:H1")
     f1 = ws["F1"]
     f1.value     = "사진은 해당 리뷰에 맞는 넘버로 동일하게 포토파일명을 변경해주세요!"
-    f1.fill      = green_fill
     f1.font      = red_font
     f1.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
 
