@@ -1434,6 +1434,7 @@ with st.sidebar:
         "📄 견적서 생성",
         "🌐 홈페이지 자동 개선",
         "📊 함소아 보고서",
+        "🖼️ 배경 흰색 변환",
     ], label_visibility="collapsed")
     st.markdown("---")
     st.caption("버즈필터 업무 자동화 시스템")
@@ -2141,4 +2142,46 @@ elif menu == "🚚 위탁 발주":
             file_name=fname,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary"
+        )
+
+elif menu == "🖼️ 배경 흰색 변환":
+    st.title("🖼️ 배경 흰색 변환")
+    st.subheader("투명 배경 이미지를 흰색 배경으로 자동 변환합니다.")
+
+    from PIL import Image as PILImage
+
+    uploaded = st.file_uploader("이미지 업로드 (PNG, JPG, WEBP)", type=["png", "jpg", "jpeg", "webp"])
+
+    if uploaded:
+        img = PILImage.open(uploaded)
+
+        # 흰 배경 합성
+        white_bg = PILImage.new("RGB", img.size, (255, 255, 255))
+        if img.mode in ("RGBA", "LA"):
+            white_bg.paste(img, mask=img.split()[-1])
+        elif img.mode == "P" and "transparency" in img.info:
+            white_bg.paste(img.convert("RGBA"), mask=img.convert("RGBA").split()[-1])
+        else:
+            white_bg.paste(img)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**원본**")
+            st.image(img, use_container_width=True)
+        with col2:
+            st.markdown("**변환 결과 (흰 배경)**")
+            st.image(white_bg, use_container_width=True)
+
+        # 다운로드 (JPG)
+        buf = io.BytesIO()
+        white_bg.save(buf, format="JPEG", quality=95)
+        buf.seek(0)
+        original_name = uploaded.name.rsplit(".", 1)[0]
+        st.download_button(
+            label="⬇️ 흰 배경 이미지 다운로드 (JPG)",
+            data=buf,
+            file_name=f"{original_name}_white.jpg",
+            mime="image/jpeg",
+            type="primary",
+            use_container_width=True,
         )
