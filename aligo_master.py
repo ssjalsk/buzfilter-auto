@@ -1512,10 +1512,14 @@ if menu == "🏭 버즈필터 발주":
 [출력 형식 — 정확히 두 줄만]
 상품코드: (목록의 코드)
 브랜드: (목록의 브랜드)"""
-                    resp = client.messages.create(
-                        model="claude-haiku-4-5-20251001", max_tokens=100,
-                        messages=[{"role": "user", "content": prompt}]
-                    )
+                    try:
+                        resp = client.messages.create(
+                            model="claude-haiku-4-5-20251001", max_tokens=100,
+                            messages=[{"role": "user", "content": prompt}]
+                        )
+                    except Exception as api_err:
+                        st.error(f"❌ API 오류 ({type(api_err).__name__}): {api_err}")
+                        st.stop()
                     rt = resp.content[0].text.strip()
                     mc, mb = parse_match_response(rt)
                     mb = str(mb).split('\n')[0].strip()
