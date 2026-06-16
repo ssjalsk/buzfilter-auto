@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import requests
 import gspread
@@ -43,10 +44,13 @@ def send_kakao_message(access_token, text):
 
 
 def parse_date(value):
-    s = str(value).strip().split(" ")[0]
-    s = s.replace(".", "-").replace("/", "-")
+    s = str(value).strip()
+    m = re.search(r"(\d{4})[.\-/\s]+(\d{1,2})[.\-/\s]+(\d{1,2})", s)
+    if not m:
+        return None
+    y, mo, d = (int(x) for x in m.groups())
     try:
-        return datetime.strptime(s[:10], "%Y-%m-%d").date()
+        return datetime(y, mo, d).date()
     except Exception:
         return None
 
