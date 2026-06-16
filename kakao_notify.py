@@ -9,6 +9,7 @@ import pytz
 KST = pytz.timezone("Asia/Seoul")
 SHEET_ID = "1OJkg679B09qvW5hAY_vT35KD0dl5435peGszwv55Fzs"
 SHEET_TAB = "업무시트"
+TOKEN_EXPIRE_DATE = datetime(2026, 8, 15)  # 리프레시 토큰 만료일 (발급 후 60일)
 
 
 def refresh_access_token(rest_api_key, refresh_token):
@@ -97,6 +98,16 @@ def main():
                 and row_time.minute == now.minute):
             matched.append(topic)
             print(f"  매칭: 행{i} [{topic}] {date_val} {time_val}")
+
+    # 토큰 만료 D-10 이내 경고 (매일 09:00에 한 번만)
+    days_left = (TOKEN_EXPIRE_DATE - now.replace(tzinfo=None)).days
+    if days_left <= 10 and now.hour == 9 and now.minute == 0:
+        access_token = refresh_access_token(
+            os.environ["KAKAO_REST_API_KEY"],
+            os.environ["KAKAO_REFRESH_TOKEN"],
+        )
+        send_kakao_message(access_token, f"⚠️ 카카오 알림봇 토큰이 {days_left}일 후 만료됩니다. 알리고에게 갱신 요청하세요!")
+        print(f"토큰 만료 경고 전송: D-{days_left}")
 
     if not matched:
         print("알림 없음")
