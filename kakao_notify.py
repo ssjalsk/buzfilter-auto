@@ -4,7 +4,7 @@ import json
 import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 KST = pytz.timezone("Asia/Seoul")
@@ -97,11 +97,11 @@ def main():
         if row_date is None or row_time is None:
             continue
 
-        if (row_date == now.date()
-                and row_time.hour == now.hour
-                and row_time.minute == now.minute):
+        scheduled = datetime.combine(row_date, row_time)
+        diff_sec = (now.replace(tzinfo=None) - scheduled).total_seconds()
+        if 0 <= diff_sec < 300:  # 예약시간 기준 0~5분 이내 (GitHub Actions 지연 대응)
             matched.append(topic)
-            print(f"  매칭: 행{i} [{topic}] {date_val} {time_val}")
+            print(f"  매칭: 행{i} [{topic}] {date_val} {time_val} (diff={int(diff_sec)}s)")
 
     # 토큰 만료 D-10 이내 경고 (매일 09:00에 한 번만)
     days_left = (TOKEN_EXPIRE_DATE - now.replace(tzinfo=None)).days
