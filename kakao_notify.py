@@ -82,30 +82,41 @@ def main():
 
     matched = []
     for i, row in enumerate(rows[1:], start=2):
-        if len(row) < 8:
-            continue
+        # 짧은 행을 8칸으로 패딩 (get_all_values는 빈 열을 생략할 수 있음)
+        row = list(row) + [""] * max(0, 8 - len(row))
+
         topic = row[0].strip()    # A열
         date_val = row[6].strip()  # G열
         time_val = row[7].strip()  # H열
 
-        if not topic or not date_val or not time_val:
+        if not topic:
+            continue
+
+        if not date_val or not time_val:
+            print(f"  스킵: 행{i} [{topic}] 날짜/시간 비어있음 (date='{date_val}', time='{time_val}')")
             continue
 
         row_date = parse_date(date_val)
         row_time = parse_time(time_val)
 
-        if row_date is None or row_time is None:
+        if row_date is None:
+            print(f"  스킵: 행{i} [{topic}] 날짜 파싱 실패 (date='{date_val}')")
+            continue
+        if row_time is None:
+            print(f"  스킵: 행{i} [{topic}] 시간 파싱 실패 (time='{time_val}')")
             continue
 
         scheduled = datetime.combine(row_date, row_time)
         diff_sec = (now.replace(tzinfo=None) - scheduled).total_seconds()
-        if 0 <= diff_sec < 300:  # 예약시간 기준 0~5분 이내 (GitHub Actions 지연 대응)
+        print(f"  검사: 행{i} [{topic}] {date_val} {time_val} → diff={int(diff_sec)}s")
+
+        if 0 <= diff_sec < 600:  # 예약시간 기준 0~10분 이내 (10분 cron 주기에 맞춤)
             matched.append(topic)
             print(f"  매칭: 행{i} [{topic}] {date_val} {time_val} (diff={int(diff_sec)}s)")
 
     # 토큰 만료 D-10 이내 경고 (매일 09:00에 한 번만)
     days_left = (TOKEN_EXPIRE_DATE - now.replace(tzinfo=None)).days
-    if days_left <= 10 and now.hour == 9 and now.minute == 0:
+    if days_left <= 10 and now.hour == 9 and now.minute < 10:
         access_token = refresh_access_token(
             os.environ["KAKAO_REST_API_KEY"],
             os.environ["KAKAO_REFRESH_TOKEN"],
