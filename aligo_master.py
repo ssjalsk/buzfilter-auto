@@ -1576,14 +1576,29 @@ elif menu == "✍️ 리뷰 생성":
             for img in product_images:
                 st.image(img, caption=img.name, use_container_width=True)
     st.markdown("### ⚙️ STEP 2 — 리뷰 설정")
-    col1, col2 = st.columns(2)
-    with col1:
-        review_count = st.number_input("리뷰 개수", min_value=1, max_value=100, value=10, step=1)
-    with col2:
-        char_count = st.number_input("리뷰당 글자 수 (약)", min_value=50, max_value=500, value=150, step=10)
+    if 'review_batches' not in st.session_state:
+        st.session_state.review_batches = [{'id': 0}]
+        st.session_state._batch_next_id = 1
+    for batch in list(st.session_state.review_batches):
+        bid = batch['id']
+        col1, col2, col3 = st.columns([4, 4, 1])
+        with col1:
+            st.number_input("리뷰 개수", min_value=1, max_value=200, value=st.session_state.get(f"rc_{bid}", 10), step=1, key=f"rc_{bid}")
+        with col2:
+            st.number_input("리뷰당 글자 수 (약)", min_value=50, max_value=500, value=st.session_state.get(f"cc_{bid}", 150), step=10, key=f"cc_{bid}")
+        with col3:
+            st.write(""); st.write("")
+            if len(st.session_state.review_batches) > 1 and st.button("🗑️", key=f"del_{bid}", help="삭제"):
+                st.session_state.review_batches = [b for b in st.session_state.review_batches if b['id'] != bid]
+                st.rerun()
+    if st.button("➕ 설정 추가"):
+        new_id = st.session_state.get('_batch_next_id', len(st.session_state.review_batches))
+        st.session_state._batch_next_id = new_id + 1
+        st.session_state.review_batches.append({'id': new_id})
+        st.rerun()
     st.markdown("---")
-    total_batches = max(1, (review_count + 19) // 20)
-    st.caption(f"💡 {review_count}개 요청 시 20개씩 {total_batches}번 나눠 생성됩니다.")
+    total_reviews_sum = sum(st.session_state.get(f"rc_{b['id']}", 10) for b in st.session_state.review_batches)
+    st.caption(f"💡 총 {total_reviews_sum}개 리뷰 생성 예정 ({len(st.session_state.review_batches)}개 설정)")
     if st.button("🚀 리뷰 생성 시작", type="primary", use_container_width=True):
         if not product_info.strip():
             st.error("❌ 제품 정보를 입력해주세요!")
@@ -1599,22 +1614,33 @@ elif menu == "✍️ 리뷰 생성":
                         img_b64 = base64.b64encode(img_bytes).decode('utf-8')
                         ext = product_image.name.split('.')[-1].lower()
                         image_data_list.append({"media_type": media_type_map.get(ext, "image/jpeg"), "data": img_b64})
+                batches_snapshot = list(st.session_state.review_batches)
+                num_batches = len(batches_snapshot)
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                def update_progress(current_batch, total_b, total_generated):
-                    pct = int((current_batch / total_b) * 100)
-                    progress_bar.progress(pct)
-                    status_text.text(f"⏳ 배치 {current_batch}/{total_b} 완료 — 현재까지 {total_generated}개 생성됨")
-                status_text.text(f"🚀 리뷰 생성 시작 (총 {total_batches}번 배치 호출)...")
-                parsed = generate_reviews_with_claude(
-                    client=ai_client, product_info=product_info, selling_points=selling_points,
-                    review_count=review_count, char_count=char_count,
-                    image_data_list=image_data_list, progress_callback=update_progress)
+                all_reviews = []
+                review_offset = 0
+                for batch_idx, batch in enumerate(batches_snapshot):
+                    bid = batch['id']
+                    b_count = st.session_state.get(f"rc_{bid}", 10)
+                    b_chars = st.session_state.get(f"cc_{bid}", 150)
+                    status_text.text(f"🚀 설정 {batch_idx+1}/{num_batches} 생성 중 ({b_count}개, {b_chars}자)...")
+                    def update_progress(current_batch, total_b, total_generated, _bidx=batch_idx, _nb=num_batches, _off=review_offset):
+                        overall = (_bidx + current_batch / max(total_b, 1)) / _nb
+                        progress_bar.progress(min(int(overall * 100), 99))
+                        status_text.text(f"⏳ 설정 {_bidx+1}/{_nb} — 배치 {current_batch}/{total_b} — 현재까지 {_off + total_generated}개")
+                    parsed = generate_reviews_with_claude(
+                        client=ai_client, product_info=product_info, selling_points=selling_points,
+                        review_count=b_count, char_count=b_chars,
+                        image_data_list=image_data_list, progress_callback=update_progress)
+                    for _, content in parsed:
+                        review_offset += 1
+                        all_reviews.append((review_offset, content))
                 progress_bar.progress(100)
                 status_text.empty()
-                st.session_state.generated_reviews = list(parsed)
+                st.session_state.generated_reviews = all_reviews
                 st.session_state.review_edit_mode = True
-                st.success(f"✅ 총 {len(parsed)}개 리뷰 생성 완료!")
+                st.success(f"✅ 총 {len(all_reviews)}개 리뷰 생성 완료!")
             except Exception as e:
                 st.error(f"❌ 생성 실패: {e}")
     if st.session_state.review_edit_mode and st.session_state.generated_reviews:
