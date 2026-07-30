@@ -1419,6 +1419,293 @@ def generate_hamsoa_ppt(competitor_records, meta, hamsoa_articles, billing_data,
     return buf
 
 
+# ==================== 상세페이지 제작 관련 ====================
+
+def analyze_product_for_detail_page(client, image_data_list, product_info, selling_points):
+    """Claude Sonnet으로 제품 이미지+정보 분석, dict 반환"""
+    content = []
+    for img in image_data_list:
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": img["media_type"], "data": img["data"]}
+        })
+
+    prompt = f"""제품 이미지와 정보를 분석하여 상세페이지 제작에 필요한 정보를 JSON 형식으로 반환해주세요.
+
+[제품 정보]
+{product_info}
+
+[판매 포인트]
+{selling_points if selling_points else "없음"}
+
+다음 JSON 형식으로만 응답하세요 (설명 없이 JSON만):
+{{
+  "main_feature": "핵심 특징 한 줄 (20자 이내)",
+  "features": ["특징1", "특징2", "특징3"],
+  "mood": "모던/내추럴/프리미엄/귀여운 중 택1",
+  "color_theme": "주요 색상 (예: 베이지, 딥블루)",
+  "target": "타겟 고객 (예: 30대 주부, 직장인)",
+  "tagline": "캐치프레이즈 한 줄 (25자 이내)"
+}}"""
+
+    content.append({"type": "text", "text": prompt})
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1000,
+        messages=[{"role": "user", "content": content}]
+    )
+
+    raw = response.content[0].text.strip()
+    try:
+        if "```" in raw:
+            raw = re.sub(r'```(?:json)?\n?', '', raw).strip().rstrip('`').strip()
+        result = json.loads(raw)
+    except Exception:
+        result = {
+            "main_feature": (product_info[:20] if product_info else "프리미엄 제품"),
+            "features": ["고품질 소재", "편리한 사용", "합리적 가격"],
+            "mood": "모던",
+            "color_theme": "화이트",
+            "target": "20-40대",
+            "tagline": "당신의 일상을 특별하게"
+        }
+    return result
+
+
+def generate_banner_copy(client, analysis, banner_type, product_name, selling_points, review_texts=None):
+    """Claude Haiku로 배너별 카피라이팅 생성. banner_type: hero/features/usage/review/info"""
+
+    type_context = {
+        "hero": f"메인 히어로 배너. 핵심특징: {analysis.get('main_feature', '')} / 캐치프레이즈: {analysis.get('tagline', '')}",
+        "features": f"제품 특징 배너. 특징: {', '.join(analysis.get('features', []))} / 판매포인트: {selling_points or '없음'}",
+        "usage": f"사용법/활용 배너. 분위기: {analysis.get('mood', '')} / 타겟: {analysis.get('target', '')}",
+        "review": f"구매 후기 배너. 참고 리뷰: {chr(10).join((review_texts or [])[:2]) or '없음'}",
+        "info": f"브랜드/상품 정보 배너. 핵심특징: {analysis.get('main_feature', '')} / 분위기: {analysis.get('mood', '')}",
+    }
+
+    prompt = f"""상세페이지 배너 카피라이팅 작업입니다.
+
+제품명: {product_name}
+배너 유형: {banner_type}
+배경 정보: {type_context.get(banner_type, '')}
+
+다음 JSON 형식으로만 응답하세요 (설명 없이 JSON만):
+{{
+  "headline": "메인 헤드라인 (15자 이내)",
+  "subtext": "서브 텍스트 (25자 이내)",
+  "body": "본문 텍스트 (40자 이내)"
+}}
+
+[작성 조건]
+- 한국어로 작성
+- 구매욕구를 자극하는 카피
+- 이모지 사용 금지"""
+
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=300,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    raw = response.content[0].text.strip()
+    try:
+        if "```" in raw:
+            raw = re.sub(r'```(?:json)?\n?', '', raw).strip().rstrip('`').strip()
+        result = json.loads(raw)
+    except Exception:
+        result = {
+            "headline": product_name[:15],
+            "subtext": analysis.get('tagline', '특별한 제품을 만나보세요')[:25],
+            "body": (selling_points[:40] if selling_points else '지금 바로 확인해보세요')
+        }
+    return result
+
+
+def create_banner_image(product_img_bytes, copy_data, banner_type, style, analysis,
+                         font_regular_path, font_bold_path):
+    """Pillow로 780x1200px 배너 이미지 생성. 반환: PIL Image"""
+    try:
+        from PIL import Image as _PILImg, ImageDraw as _Draw, ImageFont as _Font
+    except ImportError:
+        raise ImportError("Pillow 라이브러리가 필요합니다. pip install Pillow")
+
+    W, H = 780, 1200
+    IMG_H = int(H * 0.6)   # 상단 60% = 720px (제품 이미지 영역)
+    TEXT_Y = IMG_H           # 텍스트 시작 Y = 720
+
+    # ── 배경 생성 ──
+    if style == "심플형":
+        banner = _PILImg.new("RGB", (W, H), (255, 255, 255))
+    else:
+        # 감성형: 색상 테마 기반 그라디언트
+        banner = _PILImg.new("RGB", (W, H), (255, 255, 255))
+        draw_grad = _Draw(banner)
+        color_theme = analysis.get('color_theme', '베이지').lower()
+        if '블루' in color_theme or 'blue' in color_theme:
+            top_c, bot_c = (220, 235, 255), (240, 248, 255)
+        elif '핑크' in color_theme or 'pink' in color_theme:
+            top_c, bot_c = (255, 230, 235), (255, 245, 248)
+        elif '그린' in color_theme or 'green' in color_theme:
+            top_c, bot_c = (220, 245, 230), (240, 255, 245)
+        elif '퍼플' in color_theme or 'purple' in color_theme:
+            top_c, bot_c = (240, 225, 255), (250, 240, 255)
+        else:  # 기본 베이지/따뜻한 톤
+            top_c, bot_c = (255, 248, 240), (250, 243, 233)
+        for y in range(H):
+            r = int(top_c[0] + (bot_c[0] - top_c[0]) * y / H)
+            g = int(top_c[1] + (bot_c[1] - top_c[1]) * y / H)
+            b = int(top_c[2] + (bot_c[2] - top_c[2]) * y / H)
+            draw_grad.line([(0, y), (W, y)], fill=(r, g, b))
+
+    draw = _Draw(banner)
+
+    # ── 폰트 로드 (fallback 처리) ──
+    def _load_font(path, size):
+        try:
+            if path and os.path.exists(path):
+                return _Font.truetype(path, size)
+        except Exception:
+            pass
+        try:
+            return _Font.load_default()
+        except Exception:
+            return None
+
+    font_title = _load_font(font_bold_path, 52)
+    font_sub   = _load_font(font_regular_path, 32)
+    font_body  = _load_font(font_regular_path, 26)
+    font_small = _load_font(font_regular_path, 20)
+
+    # ── 제품 이미지 배치 (상단 60%, 비율 유지, 중앙 정렬) ──
+    if product_img_bytes:
+        try:
+            prod = _PILImg.open(io.BytesIO(product_img_bytes)).convert("RGBA")
+            pad = 40
+            prod.thumbnail((W - pad * 2, IMG_H - pad * 2), _PILImg.LANCZOS)
+            pw, ph = prod.size
+            px = (W - pw) // 2
+            py = pad + ((IMG_H - pad * 2 - ph) // 2)
+            if style == "심플형":
+                bg_layer = _PILImg.new("RGBA", prod.size, (255, 255, 255, 255))
+                composite = _PILImg.alpha_composite(bg_layer, prod).convert("RGB")
+                banner.paste(composite, (px, py))
+            else:
+                banner.paste(prod, (px, py), prod)
+        except Exception:
+            pass
+
+    # ── 구분선 (심플형) ──
+    if style == "심플형":
+        draw.line([(30, TEXT_Y), (W - 30, TEXT_Y)], fill=(220, 220, 220), width=1)
+
+    # ── 텍스트 색상 ──
+    if style == "심플형":
+        text_color, sub_color, accent_color = (30, 30, 30), (80, 80, 80), (60, 60, 60)
+    else:
+        text_color, sub_color, accent_color = (40, 40, 40), (90, 80, 70), (120, 80, 50)
+
+    headline = copy_data.get("headline", "")
+    subtext  = copy_data.get("subtext", "")
+    body     = copy_data.get("body", "")
+
+    # ── 텍스트 그리기 헬퍼 ──
+    def _draw_centered(text, y, font, color):
+        if not text or not font:
+            return y + 40
+        try:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            draw.text(((W - tw) // 2, y), text, font=font, fill=color)
+            return y + th + 14
+        except Exception:
+            return y + 50
+
+    def _draw_wrapped(text, y, font, color, max_w=700):
+        if not text or not font:
+            return y + 30
+        try:
+            line, result_y = "", y
+            for ch in text:
+                test = line + ch
+                bbox = draw.textbbox((0, 0), test, font=font)
+                if bbox[2] - bbox[0] > max_w and line:
+                    result_y = _draw_centered(line, result_y, font, color)
+                    line = ch
+                else:
+                    line = test
+            if line:
+                result_y = _draw_centered(line, result_y, font, color)
+            return result_y
+        except Exception:
+            return y + 40
+
+    # ── 배너 타입별 레이아웃 ──
+    y = TEXT_Y + 35
+
+    if banner_type == "hero":
+        y = _draw_centered(headline, y, font_title, text_color)
+        y += 12
+        y = _draw_wrapped(subtext, y, font_sub, sub_color)
+        y += 8
+        y = _draw_wrapped(body, y, font_body, accent_color)
+
+    elif banner_type == "features":
+        y = _draw_centered(headline, y, font_sub, text_color)
+        y += 22
+        for feat in analysis.get('features', [])[:3]:
+            y = _draw_wrapped(f"• {feat}", y, font_body, sub_color)
+            y += 6
+
+    elif banner_type == "usage":
+        y = _draw_centered(headline, y, font_sub, text_color)
+        y += 16
+        y = _draw_wrapped(subtext, y, font_body, sub_color)
+        y += 10
+        y = _draw_wrapped(body, y, font_small, accent_color)
+
+    elif banner_type == "review":
+        _draw_centered('"', y, font_title, (180, 180, 180))
+        y += 22
+        y = _draw_wrapped(body, y, font_body, sub_color)
+        y += 10
+        y = _draw_centered(f"— {subtext}", y, font_small, accent_color)
+
+    elif banner_type == "info":
+        y = _draw_centered(headline, y, font_sub, text_color)
+        y += 16
+        y = _draw_wrapped(subtext, y, font_body, sub_color)
+        y += 10
+        y = _draw_wrapped(body, y, font_small, accent_color)
+
+    return banner
+
+
+def create_detail_zip(banners_a, banners_b, product_name):
+    """A/B버전 배너 이미지 리스트를 ZIP으로 패키징. 반환: BytesIO"""
+    zip_buf = io.BytesIO()
+    labels = ["배너01", "배너02", "배너03", "배너04", "배너05"]
+
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for i, img in enumerate(banners_a):
+            if i >= len(labels):
+                break
+            img_buf = io.BytesIO()
+            img.save(img_buf, format="JPEG", quality=92)
+            zf.writestr(f"A버전_심플형/{product_name}_A_{labels[i]}.jpg", img_buf.getvalue())
+
+        for i, img in enumerate(banners_b):
+            if i >= len(labels):
+                break
+            img_buf = io.BytesIO()
+            img.save(img_buf, format="JPEG", quality=92)
+            zf.writestr(f"B버전_감성형/{product_name}_B_{labels[i]}.jpg", img_buf.getvalue())
+
+    zip_buf.seek(0)
+    return zip_buf
+
+
 # ==================== Streamlit 앱 ====================
 
 st.set_page_config(page_title="버즈필터 자동화", page_icon="🤖", layout="wide")
@@ -1432,6 +1719,7 @@ with st.sidebar:
         "✍️ 리뷰 생성",
         "📝 리뷰 입력",
         "📄 견적서 생성",
+        "🖼️ 상세페이지 제작",
         "🌐 홈페이지 자동 개선",
         "📊 함소아 보고서",
         "🖼️ 배경 흰색 변환",
@@ -2215,3 +2503,279 @@ elif menu == "🖼️ 배경 흰색 변환":
             type="primary",
             use_container_width=True,
         )
+
+elif menu == "🖼️ 상세페이지 제작":
+    st.title("🖼️ 상세페이지 자동 제작")
+    st.subheader("제품 이미지와 정보를 입력하면 A/B 버전 상세페이지 배너를 자동 생성합니다.")
+
+    # session_state 초기화 (dp_ 프리픽스)
+    for _dp_key, _dp_default in [
+        ("dp_analysis", None), ("dp_copy_list", []),
+        ("dp_banners_a", []), ("dp_banners_b", []),
+        ("dp_reviews_used", [])
+    ]:
+        if _dp_key not in st.session_state:
+            st.session_state[_dp_key] = _dp_default
+
+    # ── STEP 1: 상품 정보 + 이미지 ──
+    st.markdown("### STEP 1 — 상품 정보 + 이미지")
+
+    dp_product_name = st.text_input(
+        "상품명", placeholder="예) 유기농 콜라겐 마스크팩", key="dp_product_name_input")
+    dp_selling_points = st.text_area(
+        "판매 포인트 (선택)", height=80,
+        placeholder="예) 저자극 성분, 수분 집중 케어, 가성비",
+        key="dp_selling_points_input")
+
+    dp_images = st.file_uploader(
+        "제품 이미지 (최대 5장, jpg/png/webp)",
+        type=["jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=True,
+        key="dp_images_upload")
+
+    if dp_images and len(dp_images) > 5:
+        st.warning("최대 5장까지만 사용됩니다. 앞의 5장이 적용됩니다.")
+        dp_images = list(dp_images)[:5]
+
+    # 리뷰 불러오기
+    dp_use_reviews = st.checkbox(
+        "리뷰 생성 메뉴에서 만든 리뷰 불러오기", key="dp_use_reviews_chk")
+    if dp_use_reviews:
+        existing_reviews = st.session_state.get("generated_reviews", [])
+        if existing_reviews:
+            top_reviews = existing_reviews[:3]
+            st.info(f"리뷰 {len(existing_reviews)}개 중 상위 3개를 배너에 활용합니다.")
+            for _num, _content in top_reviews:
+                st.caption(f"• {_content[:60]}...")
+            st.session_state["dp_reviews_used"] = [c for _, c in top_reviews]
+        else:
+            st.warning("생성된 리뷰가 없습니다. 리뷰 생성 메뉴에서 먼저 리뷰를 만들어주세요.")
+            st.session_state["dp_reviews_used"] = []
+    else:
+        st.session_state["dp_reviews_used"] = []
+
+    if st.button("🔍 AI 상품 분석 시작", key="dp_analyze_btn"):
+        if not dp_product_name.strip():
+            st.error("상품명을 입력해주세요!")
+        else:
+            with st.spinner("Claude Sonnet이 상품을 분석 중..."):
+                try:
+                    _dp_client = get_anthropic_client()
+                    _dp_img_list = []
+                    _mt_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+                               "png": "image/png", "webp": "image/webp"}
+                    if dp_images:
+                        for _f in list(dp_images)[:5]:
+                            _f.seek(0)
+                            _b64 = base64.b64encode(_f.read()).decode('utf-8')
+                            _ext = _f.name.split('.')[-1].lower()
+                            _dp_img_list.append({
+                                "media_type": _mt_map.get(_ext, "image/jpeg"),
+                                "data": _b64
+                            })
+                    _analysis = analyze_product_for_detail_page(
+                        _dp_client, _dp_img_list, dp_product_name, dp_selling_points)
+                    st.session_state["dp_analysis"] = _analysis
+                    st.success("분석 완료! 아래에서 결과를 확인하세요.")
+                except Exception as _e:
+                    st.error(f"분석 실패: {_e}")
+
+    # 분석 결과 표시
+    if st.session_state.get("dp_analysis"):
+        _a = st.session_state["dp_analysis"]
+        with st.expander("분석 결과 확인", expanded=True):
+            _c1, _c2, _c3 = st.columns(3)
+            with _c1:
+                st.metric("분위기", _a.get("mood", ""))
+                st.metric("색상 테마", _a.get("color_theme", ""))
+            with _c2:
+                st.metric("타겟", _a.get("target", ""))
+                st.metric("핵심 특징", _a.get("main_feature", ""))
+            with _c3:
+                st.metric("캐치프레이즈", _a.get("tagline", ""))
+            if _a.get("features"):
+                st.write("감지된 특징:", " / ".join(_a.get("features", [])))
+
+    # ── STEP 2: 배너 설정 (분석 완료 후만 표시) ──
+    if st.session_state.get("dp_analysis"):
+        st.markdown("---")
+        st.markdown("### STEP 2 — 배너 설정")
+
+        _scol1, _scol2 = st.columns(2)
+        with _scol1:
+            dp_banner_count = st.selectbox(
+                "배너 장수", ["5장", "3장"], key="dp_banner_count_sel")
+        with _scol2:
+            dp_competitor_url = st.text_input(
+                "경쟁사 URL (선택 — 차별화 포인트 분석용)",
+                placeholder="https://example.com/product",
+                key="dp_comp_url_input")
+
+        if dp_competitor_url.strip():
+            if st.button("경쟁사 분석", key="dp_comp_analyze_btn"):
+                with st.spinner("경쟁사 페이지 분석 중..."):
+                    try:
+                        _headers = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                                          'AppleWebKit/537.36 (KHTML, like Gecko) '
+                                          'Chrome/120.0.0.0 Safari/537.36'
+                        }
+                        _resp = requests.get(
+                            dp_competitor_url.strip(), headers=_headers, timeout=10)
+                        _resp.encoding = 'utf-8'
+                        _html_text = _resp.text[:5000]
+
+                        _dp_client2 = get_anthropic_client()
+                        _comp_prompt = f"""다음은 경쟁사 페이지 HTML입니다.
+이 상세페이지와 차별화할 수 있는 포인트 3가지를 간결하게 분석해주세요.
+
+HTML:
+{_html_text}
+
+번호 목록 형식으로 3가지만 작성해주세요."""
+                        _cr = _dp_client2.messages.create(
+                            model="claude-haiku-4-5-20251001",
+                            max_tokens=500,
+                            messages=[{"role": "user", "content": _comp_prompt}]
+                        )
+                        st.info(_cr.content[0].text.strip())
+                    except requests.exceptions.Timeout:
+                        st.warning("URL 연결 시간이 초과되었습니다. (10초)")
+                    except requests.exceptions.RequestException as _re_err:
+                        st.warning(f"URL 접근 실패: {_re_err}")
+                    except Exception as _ce:
+                        st.warning(f"분석 중 오류가 발생했습니다: {_ce}")
+
+        # ── STEP 3: 생성 ──
+        st.markdown("---")
+        st.markdown("### STEP 3 — 배너 생성")
+
+        if st.button("✨ 상세페이지 A/B 버전 생성", type="primary",
+                     use_container_width=True, key="dp_generate_btn"):
+            if not dp_images:
+                st.info("제품 이미지가 없어도 생성됩니다. 이미지를 업로드하면 더 좋은 결과를 얻을 수 있습니다.")
+
+            _dp_analysis = st.session_state["dp_analysis"]
+            _dp_reviews  = st.session_state.get("dp_reviews_used", [])
+            _banner_n    = 5 if dp_banner_count == "5장" else 3
+
+            # 배너 타입 순서 결정
+            if _dp_reviews:
+                _btypes_all = ["hero", "features", "usage", "review", "info"]
+            else:
+                _btypes_all = ["hero", "features", "usage", "info", "info"]
+            _btypes = _btypes_all[:_banner_n]
+
+            # 폰트 경로 (generate_quote_pdf와 동일 방식)
+            _dp_base = os.path.dirname(os.path.abspath(__file__))
+            _font_r = os.path.join(_dp_base, 'NotoSansKR-Regular.ttf')
+            _font_b = os.path.join(_dp_base, 'NotoSansKR-Bold.ttf')
+
+            # 제품 이미지 바이트 (첫 번째 이미지)
+            _prod_bytes = None
+            if dp_images:
+                try:
+                    list(dp_images)[0].seek(0)
+                    _prod_bytes = list(dp_images)[0].read()
+                except Exception:
+                    pass
+
+            _dp_client3 = get_anthropic_client()
+            _banners_a, _banners_b, _copy_list = [], [], []
+
+            _progress = st.progress(0)
+            _status   = st.empty()
+            _total_steps = _banner_n * 2  # 카피 + 이미지 생성
+
+            try:
+                _step = 0
+                for _i, _btype in enumerate(_btypes):
+                    _status.text(f"배너 {_i+1}/{_banner_n} 카피 생성 중...")
+                    _copy = generate_banner_copy(
+                        _dp_client3, _dp_analysis, _btype,
+                        dp_product_name, dp_selling_points, _dp_reviews)
+                    _copy_list.append(_copy)
+                    _step += 1
+                    _progress.progress(int(_step / _total_steps * 100))
+
+                    _status.text(f"배너 {_i+1}/{_banner_n} 이미지 생성 중 (A/B)...")
+                    _ban_a = create_banner_image(
+                        _prod_bytes, _copy, _btype, "심플형",
+                        _dp_analysis, _font_r, _font_b)
+                    _ban_b = create_banner_image(
+                        _prod_bytes, _copy, _btype, "감성형",
+                        _dp_analysis, _font_r, _font_b)
+                    _banners_a.append(_ban_a)
+                    _banners_b.append(_ban_b)
+                    _step += 1
+                    _progress.progress(int(_step / _total_steps * 100))
+
+                st.session_state["dp_banners_a"] = _banners_a
+                st.session_state["dp_banners_b"] = _banners_b
+                st.session_state["dp_copy_list"] = _copy_list
+                _progress.progress(100)
+                _status.text("생성 완료!")
+                st.success(f"A/B 버전 각 {_banner_n}장 생성 완료!")
+            except Exception as _gen_err:
+                st.error(f"생성 실패: {_gen_err}")
+
+        # ── 결과 표시 ──
+        if st.session_state.get("dp_banners_a") and st.session_state.get("dp_banners_b"):
+            st.markdown("---")
+            _tab_a, _tab_b = st.tabs(["📋 A버전 (심플형)", "🎨 B버전 (감성형)"])
+            _copy_list_r = st.session_state.get("dp_copy_list", [])
+            _blabels = ["히어로", "특징", "사용법", "리뷰", "정보"]
+
+            with _tab_a:
+                for _i, _img in enumerate(st.session_state["dp_banners_a"]):
+                    _lbl = _blabels[_i] if _i < len(_blabels) else f"배너{_i+1}"
+                    st.markdown(f"**배너 {_i+1} — {_lbl}**")
+                    st.image(_img, use_container_width=True)
+                    if _i < len(_copy_list_r):
+                        _cp = _copy_list_r[_i]
+                        with st.expander(f"배너 {_i+1} 카피 확인/수정"):
+                            st.text_area("헤드라인", value=_cp.get("headline", ""),
+                                         key=f"dp_a_hl_{_i}", height=55)
+                            st.text_area("서브텍스트", value=_cp.get("subtext", ""),
+                                         key=f"dp_a_sub_{_i}", height=55)
+                            st.text_area("본문", value=_cp.get("body", ""),
+                                         key=f"dp_a_body_{_i}", height=70)
+
+            with _tab_b:
+                for _i, _img in enumerate(st.session_state["dp_banners_b"]):
+                    _lbl = _blabels[_i] if _i < len(_blabels) else f"배너{_i+1}"
+                    st.markdown(f"**배너 {_i+1} — {_lbl}**")
+                    st.image(_img, use_container_width=True)
+                    if _i < len(_copy_list_r):
+                        _cp = _copy_list_r[_i]
+                        with st.expander(f"배너 {_i+1} 카피 확인/수정"):
+                            st.text_area("헤드라인", value=_cp.get("headline", ""),
+                                         key=f"dp_b_hl_{_i}", height=55)
+                            st.text_area("서브텍스트", value=_cp.get("subtext", ""),
+                                         key=f"dp_b_sub_{_i}", height=55)
+                            st.text_area("본문", value=_cp.get("body", ""),
+                                         key=f"dp_b_body_{_i}", height=70)
+
+            # ── ZIP 다운로드 ──
+            st.markdown("---")
+            if st.button("⬇️ A/B 버전 ZIP 다운로드 준비",
+                         key="dp_zip_prep_btn", use_container_width=True):
+                with st.spinner("ZIP 파일 생성 중..."):
+                    try:
+                        _safe_name = re.sub(r'[^\w가-힣]', '_', dp_product_name)[:20] or "상품"
+                        _zip_buf = create_detail_zip(
+                            st.session_state["dp_banners_a"],
+                            st.session_state["dp_banners_b"],
+                            _safe_name
+                        )
+                        st.download_button(
+                            label="⬇️ A/B 버전 ZIP 다운로드",
+                            data=_zip_buf,
+                            file_name=f"{_safe_name}_상세페이지.zip",
+                            mime="application/zip",
+                            type="primary",
+                            use_container_width=True,
+                            key="dp_zip_dl_btn"
+                        )
+                    except Exception as _ze:
+                        st.error(f"ZIP 생성 실패: {_ze}")
