@@ -2726,6 +2726,12 @@ HTML:
             _copy_list_r = st.session_state.get("dp_copy_list", [])
             _blabels = ["히어로", "특징", "사용법", "리뷰", "정보"]
 
+            _dp_base2 = os.path.dirname(os.path.abspath(__file__))
+            _font_r2 = os.path.join(_dp_base2, 'NotoSansKR-Regular.ttf')
+            _font_b2 = os.path.join(_dp_base2, 'NotoSansKR-Bold.ttf')
+            _dp_analysis2 = st.session_state.get("dp_analysis", {})
+            _btypes_saved = ["hero", "features", "usage", "review", "info"]
+
             with _tab_a:
                 for _i, _img in enumerate(st.session_state["dp_banners_a"]):
                     _lbl = _blabels[_i] if _i < len(_blabels) else f"배너{_i+1}"
@@ -2733,13 +2739,31 @@ HTML:
                     st.image(_img, use_container_width=True)
                     if _i < len(_copy_list_r):
                         _cp = _copy_list_r[_i]
-                        with st.expander(f"배너 {_i+1} 카피 확인/수정"):
+                        with st.expander(f"배너 {_i+1} 텍스트 수정"):
                             st.text_area("헤드라인", value=_cp.get("headline", ""),
                                          key=f"dp_a_hl_{_i}", height=55)
                             st.text_area("서브텍스트", value=_cp.get("subtext", ""),
                                          key=f"dp_a_sub_{_i}", height=55)
                             st.text_area("본문", value=_cp.get("body", ""),
                                          key=f"dp_a_body_{_i}", height=70)
+                            if st.button(f"🔄 배너 {_i+1} 재생성", key=f"dp_a_regen_{_i}"):
+                                _new_cp = {
+                                    "headline": st.session_state.get(f"dp_a_hl_{_i}", _cp.get("headline", "")),
+                                    "subtext":  st.session_state.get(f"dp_a_sub_{_i}", _cp.get("subtext", "")),
+                                    "body":     st.session_state.get(f"dp_a_body_{_i}", _cp.get("body", "")),
+                                }
+                                _prod_bytes2 = None
+                                if dp_images:
+                                    try:
+                                        list(dp_images)[0].seek(0)
+                                        _prod_bytes2 = list(dp_images)[0].read()
+                                    except Exception:
+                                        pass
+                                _btype_i = _btypes_saved[_i] if _i < len(_btypes_saved) else "info"
+                                _new_img = create_banner_image(_prod_bytes2, _new_cp, _btype_i, "심플형", _dp_analysis2, _font_r2, _font_b2)
+                                st.session_state["dp_banners_a"][_i] = _new_img
+                                st.session_state["dp_copy_list"][_i] = _new_cp
+                                st.rerun()
 
             with _tab_b:
                 for _i, _img in enumerate(st.session_state["dp_banners_b"]):
@@ -2748,13 +2772,31 @@ HTML:
                     st.image(_img, use_container_width=True)
                     if _i < len(_copy_list_r):
                         _cp = _copy_list_r[_i]
-                        with st.expander(f"배너 {_i+1} 카피 확인/수정"):
+                        with st.expander(f"배너 {_i+1} 텍스트 수정"):
                             st.text_area("헤드라인", value=_cp.get("headline", ""),
                                          key=f"dp_b_hl_{_i}", height=55)
                             st.text_area("서브텍스트", value=_cp.get("subtext", ""),
                                          key=f"dp_b_sub_{_i}", height=55)
                             st.text_area("본문", value=_cp.get("body", ""),
                                          key=f"dp_b_body_{_i}", height=70)
+                            if st.button(f"🔄 배너 {_i+1} 재생성", key=f"dp_b_regen_{_i}"):
+                                _new_cp = {
+                                    "headline": st.session_state.get(f"dp_b_hl_{_i}", _cp.get("headline", "")),
+                                    "subtext":  st.session_state.get(f"dp_b_sub_{_i}", _cp.get("subtext", "")),
+                                    "body":     st.session_state.get(f"dp_b_body_{_i}", _cp.get("body", "")),
+                                }
+                                _prod_bytes2 = None
+                                if dp_images:
+                                    try:
+                                        list(dp_images)[0].seek(0)
+                                        _prod_bytes2 = list(dp_images)[0].read()
+                                    except Exception:
+                                        pass
+                                _btype_i = _btypes_saved[_i] if _i < len(_btypes_saved) else "info"
+                                _new_img = create_banner_image(_prod_bytes2, _new_cp, _btype_i, "감성형", _dp_analysis2, _font_r2, _font_b2)
+                                st.session_state["dp_banners_b"][_i] = _new_img
+                                st.session_state["dp_copy_list"][_i] = _new_cp
+                                st.rerun()
 
             # ── ZIP 다운로드 ──
             st.markdown("---")
