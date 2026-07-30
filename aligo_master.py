@@ -1523,7 +1523,8 @@ def generate_banner_copy(client, analysis, banner_type, product_name, selling_po
 
 
 def create_banner_image(product_img_bytes, copy_data, banner_type, style, analysis,
-                         font_regular_path, font_bold_path):
+                         font_regular_path, font_bold_path,
+                         font_style="기본체", font_size="중", text_color_hex="#1E1E1E", text_align="가운데"):
     """Pillow로 780x1200px 배너 이미지 생성. 반환: PIL Image"""
     try:
         from PIL import Image as _PILImg, ImageDraw as _Draw, ImageFont as _Font
@@ -1572,10 +1573,12 @@ def create_banner_image(product_img_bytes, copy_data, banner_type, style, analys
         except Exception:
             return None
 
-    font_title = _load_font(font_bold_path, 52)
-    font_sub   = _load_font(font_regular_path, 32)
-    font_body  = _load_font(font_regular_path, 26)
-    font_small = _load_font(font_regular_path, 20)
+    _size_mult = {"소": 0.75, "중": 1.0, "대": 1.3}.get(font_size, 1.0)
+    _body_path = font_bold_path if font_style == "굵은체" else font_regular_path
+    font_title = _load_font(font_bold_path,  int(52 * _size_mult))
+    font_sub   = _load_font(_body_path,      int(32 * _size_mult))
+    font_body  = _load_font(_body_path,      int(26 * _size_mult))
+    font_small = _load_font(_body_path,      int(20 * _size_mult))
 
     # ── 제품 이미지 배치 (상단 60%, 비율 유지, 중앙 정렬) ──
     if product_img_bytes:
@@ -1600,24 +1603,34 @@ def create_banner_image(product_img_bytes, copy_data, banner_type, style, analys
         draw.line([(30, TEXT_Y), (W - 30, TEXT_Y)], fill=(220, 220, 220), width=1)
 
     # ── 텍스트 색상 ──
-    if style == "심플형":
-        text_color, sub_color, accent_color = (30, 30, 30), (80, 80, 80), (60, 60, 60)
-    else:
-        text_color, sub_color, accent_color = (40, 40, 40), (90, 80, 70), (120, 80, 50)
+    def _hex_to_rgb(h):
+        h = h.lstrip('#')
+        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+    _main_rgb = _hex_to_rgb(text_color_hex) if text_color_hex.startswith('#') else (30, 30, 30)
+    text_color   = _main_rgb
+    sub_color    = tuple(min(255, c + 60) for c in _main_rgb)
+    accent_color = tuple(min(255, c + 30) for c in _main_rgb)
 
     headline = copy_data.get("headline", "")
     subtext  = copy_data.get("subtext", "")
     body     = copy_data.get("body", "")
 
-    # ── 텍스트 그리기 헬퍼 ──
-    def _draw_centered(text, y, font, color):
+    # ── 텍스트 그리기 헬퍼 (정렬 지원) ──
+    def _draw_line(text, y, font, color):
         if not text or not font:
             return y + 40
         try:
             bbox = draw.textbbox((0, 0), text, font=font)
             tw = bbox[2] - bbox[0]
             th = bbox[3] - bbox[1]
-            draw.text(((W - tw) // 2, y), text, font=font, fill=color)
+            if text_align == "왼쪽":
+                x = 40
+            elif text_align == "오른쪽":
+                x = W - tw - 40
+            else:
+                x = (W - tw) // 2
+            draw.text((x, y), text, font=font, fill=color)
             return y + th + 14
         except Exception:
             return y + 50
@@ -1631,12 +1644,12 @@ def create_banner_image(product_img_bytes, copy_data, banner_type, style, analys
                 test = line + ch
                 bbox = draw.textbbox((0, 0), test, font=font)
                 if bbox[2] - bbox[0] > max_w and line:
-                    result_y = _draw_centered(line, result_y, font, color)
+                    result_y = _draw_line(line, result_y, font, color)
                     line = ch
                 else:
                     line = test
             if line:
-                result_y = _draw_centered(line, result_y, font, color)
+                result_y = _draw_line(line, result_y, font, color)
             return result_y
         except Exception:
             return y + 40
@@ -1645,35 +1658,35 @@ def create_banner_image(product_img_bytes, copy_data, banner_type, style, analys
     y = TEXT_Y + 35
 
     if banner_type == "hero":
-        y = _draw_centered(headline, y, font_title, text_color)
+        y = _draw_line(headline, y, font_title, text_color)
         y += 12
         y = _draw_wrapped(subtext, y, font_sub, sub_color)
         y += 8
         y = _draw_wrapped(body, y, font_body, accent_color)
 
     elif banner_type == "features":
-        y = _draw_centered(headline, y, font_sub, text_color)
+        y = _draw_line(headline, y, font_sub, text_color)
         y += 22
         for feat in analysis.get('features', [])[:3]:
             y = _draw_wrapped(f"• {feat}", y, font_body, sub_color)
             y += 6
 
     elif banner_type == "usage":
-        y = _draw_centered(headline, y, font_sub, text_color)
+        y = _draw_line(headline, y, font_sub, text_color)
         y += 16
         y = _draw_wrapped(subtext, y, font_body, sub_color)
         y += 10
         y = _draw_wrapped(body, y, font_small, accent_color)
 
     elif banner_type == "review":
-        _draw_centered('"', y, font_title, (180, 180, 180))
+        _draw_line('"', y, font_title, (180, 180, 180))
         y += 22
         y = _draw_wrapped(body, y, font_body, sub_color)
         y += 10
-        y = _draw_centered(f"— {subtext}", y, font_small, accent_color)
+        y = _draw_line(f"— {subtext}", y, font_small, accent_color)
 
     elif banner_type == "info":
-        y = _draw_centered(headline, y, font_sub, text_color)
+        y = _draw_line(headline, y, font_sub, text_color)
         y += 16
         y = _draw_wrapped(subtext, y, font_body, sub_color)
         y += 10
@@ -2635,6 +2648,18 @@ elif menu == "🖼️ 상세페이지 제작":
                     except Exception as _ce:
                         st.warning(f"분석 중 오류가 발생했습니다: {_ce}")
 
+        # ── 텍스트 스타일 설정 ──
+        st.markdown("#### 📝 텍스트 스타일")
+        _tc1, _tc2, _tc3, _tc4 = st.columns(4)
+        with _tc1:
+            dp_font_style = st.selectbox("폰트", ["기본체", "굵은체"], key="dp_font_style_sel")
+        with _tc2:
+            dp_font_size  = st.selectbox("글자 크기", ["소", "중", "대"], index=1, key="dp_font_size_sel")
+        with _tc3:
+            dp_text_color = st.color_picker("폰트 색상", "#1E1E1E", key="dp_text_color_pick")
+        with _tc4:
+            dp_text_align = st.selectbox("정렬", ["가운데", "왼쪽", "오른쪽"], key="dp_text_align_sel")
+
         # ── STEP 3: 생성 ──
         st.markdown("---")
         st.markdown("### STEP 3 — 배너 생성")
@@ -2690,10 +2715,12 @@ elif menu == "🖼️ 상세페이지 제작":
                     _status.text(f"배너 {_i+1}/{_banner_n} 이미지 생성 중 (A/B)...")
                     _ban_a = create_banner_image(
                         _prod_bytes, _copy, _btype, "심플형",
-                        _dp_analysis, _font_r, _font_b)
+                        _dp_analysis, _font_r, _font_b,
+                        dp_font_style, dp_font_size, dp_text_color, dp_text_align)
                     _ban_b = create_banner_image(
                         _prod_bytes, _copy, _btype, "감성형",
-                        _dp_analysis, _font_r, _font_b)
+                        _dp_analysis, _font_r, _font_b,
+                        dp_font_style, dp_font_size, dp_text_color, dp_text_align)
                     _banners_a.append(_ban_a)
                     _banners_b.append(_ban_b)
                     _step += 1
@@ -2749,7 +2776,9 @@ elif menu == "🖼️ 상세페이지 제작":
                                     except Exception:
                                         pass
                                 _btype_i = _btypes_saved[_i] if _i < len(_btypes_saved) else "info"
-                                _new_img = create_banner_image(_prod_bytes2, _new_cp, _btype_i, "심플형", _dp_analysis2, _font_r2, _font_b2)
+                                _new_img = create_banner_image(_prod_bytes2, _new_cp, _btype_i, "심플형", _dp_analysis2, _font_r2, _font_b2,
+                                    st.session_state.get("dp_font_style_sel","기본체"), st.session_state.get("dp_font_size_sel","중"),
+                                    st.session_state.get("dp_text_color_pick","#1E1E1E"), st.session_state.get("dp_text_align_sel","가운데"))
                                 st.session_state["dp_banners_a"][_i] = _new_img
                                 st.session_state["dp_copy_list"][_i] = _new_cp
                                 st.rerun()
@@ -2782,7 +2811,9 @@ elif menu == "🖼️ 상세페이지 제작":
                                     except Exception:
                                         pass
                                 _btype_i = _btypes_saved[_i] if _i < len(_btypes_saved) else "info"
-                                _new_img = create_banner_image(_prod_bytes2, _new_cp, _btype_i, "감성형", _dp_analysis2, _font_r2, _font_b2)
+                                _new_img = create_banner_image(_prod_bytes2, _new_cp, _btype_i, "감성형", _dp_analysis2, _font_r2, _font_b2,
+                                    st.session_state.get("dp_font_style_sel","기본체"), st.session_state.get("dp_font_size_sel","중"),
+                                    st.session_state.get("dp_text_color_pick","#1E1E1E"), st.session_state.get("dp_text_align_sel","가운데"))
                                 st.session_state["dp_banners_b"][_i] = _new_img
                                 st.session_state["dp_copy_list"][_i] = _new_cp
                                 st.rerun()
