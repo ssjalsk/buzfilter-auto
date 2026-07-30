@@ -1540,7 +1540,7 @@ def create_banner_image(product_img_bytes, copy_data, banner_type, style, analys
     else:
         # 감성형: 색상 테마 기반 그라디언트
         banner = _PILImg.new("RGB", (W, H), (255, 255, 255))
-        draw_grad = _Draw(banner)
+        draw_grad = _Draw.Draw(banner)
         color_theme = analysis.get('color_theme', '베이지').lower()
         if '블루' in color_theme or 'blue' in color_theme:
             top_c, bot_c = (220, 235, 255), (240, 248, 255)
@@ -1558,7 +1558,7 @@ def create_banner_image(product_img_bytes, copy_data, banner_type, style, analys
             b = int(top_c[2] + (bot_c[2] - top_c[2]) * y / H)
             draw_grad.line([(0, y), (W, y)], fill=(r, g, b))
 
-    draw = _Draw(banner)
+    draw = _Draw.Draw(banner)
 
     # ── 폰트 로드 (fallback 처리) ──
     def _load_font(path, size):
@@ -2606,31 +2606,24 @@ elif menu == "🖼️ 상세페이지 제작":
             dp_banner_count = st.selectbox(
                 "배너 장수", ["5장", "3장"], key="dp_banner_count_sel")
         with _scol2:
-            dp_competitor_url = st.text_input(
-                "경쟁사 URL (선택 — 차별화 포인트 분석용)",
-                placeholder="https://example.com/product",
-                key="dp_comp_url_input")
+            dp_competitor_info = st.text_area(
+                "경쟁사 정보 (선택 — 차별화 포인트 분석용)",
+                placeholder="예) 경쟁 상품명: OO 마스크팩\n특징: 저렴한 가격, 단일 성분\n단점: 향이 강함, 용량 적음",
+                height=100,
+                key="dp_comp_info_input")
 
-        if dp_competitor_url.strip():
-            if st.button("경쟁사 분석", key="dp_comp_analyze_btn"):
-                with st.spinner("경쟁사 페이지 분석 중..."):
+        if dp_competitor_info.strip():
+            if st.button("경쟁사 차별화 분석", key="dp_comp_analyze_btn"):
+                with st.spinner("차별화 포인트 분석 중..."):
                     try:
-                        _headers = {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                                          'AppleWebKit/537.36 (KHTML, like Gecko) '
-                                          'Chrome/120.0.0.0 Safari/537.36'
-                        }
-                        _resp = requests.get(
-                            dp_competitor_url.strip(), headers=_headers, timeout=10)
-                        _resp.encoding = 'utf-8'
-                        _html_text = _resp.text[:5000]
-
                         _dp_client2 = get_anthropic_client()
-                        _comp_prompt = f"""다음은 경쟁사 페이지 HTML입니다.
-이 상세페이지와 차별화할 수 있는 포인트 3가지를 간결하게 분석해주세요.
+                        _comp_prompt = f"""우리 상품과 경쟁사 정보를 비교해서 차별화 포인트 3가지를 분석해주세요.
 
-HTML:
-{_html_text}
+우리 상품: {dp_product_name}
+판매 포인트: {dp_selling_points or '없음'}
+
+경쟁사 정보:
+{dp_competitor_info}
 
 번호 목록 형식으로 3가지만 작성해주세요."""
                         _cr = _dp_client2.messages.create(
@@ -2639,10 +2632,6 @@ HTML:
                             messages=[{"role": "user", "content": _comp_prompt}]
                         )
                         st.info(_cr.content[0].text.strip())
-                    except requests.exceptions.Timeout:
-                        st.warning("URL 연결 시간이 초과되었습니다. (10초)")
-                    except requests.exceptions.RequestException as _re_err:
-                        st.warning(f"URL 접근 실패: {_re_err}")
                     except Exception as _ce:
                         st.warning(f"분석 중 오류가 발생했습니다: {_ce}")
 
