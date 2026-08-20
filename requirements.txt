@@ -9,3 +9,4 @@ Pillow
 python-pptx
 matplotlib
 msoffcrypto-tool
+streamlit-quill

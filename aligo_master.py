@@ -341,6 +341,390 @@ def deploy_to_netlify(html_content, site_id, token, extra_files=None):
     except Exception as e:
         return False, str(e)
 
+# ─────────────────────────────────────────────
+# 📖 바이럴 백과사전 헬퍼 함수
+# ─────────────────────────────────────────────
+VIRAL_SHEET_ID = "1OJkg679B09qvW5hAY_vT35KD0dl5435peGszwv55Fzs"
+VIRAL_TAB_NAME = "바이럴백과사전"
+
+def get_viral_sheet():
+    """바이럴 백과사전 구글시트 탭 연결. 없으면 자동 생성."""
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        try:
+            creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        except Exception:
+            BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+            creds = ServiceAccountCredentials.from_json_keyfile_name(
+                os.path.join(BASE_DIR, 'service_account.json'), scope)
+        client_gs = gspread.authorize(creds)
+        spreadsheet = client_gs.open_by_url(
+            f"https://docs.google.com/spreadsheets/d/{VIRAL_SHEET_ID}/")
+        try:
+            return spreadsheet.worksheet(VIRAL_TAB_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title=VIRAL_TAB_NAME, rows=500, cols=10)
+            ws.append_row(["날짜", "slug", "제목", "해시태그", "요약", "본문HTML"])
+            return ws
+    except Exception as e:
+        st.error(f"바이럴 백과사전 시트 연결 실패: {e}")
+        return None
+
+
+def get_viral_posts():
+    """게시글 목록 반환 (최신 순)"""
+    ws = get_viral_sheet()
+    if not ws:
+        return []
+    rows = ws.get_all_values()
+    if len(rows) <= 1:
+        return []
+    posts = []
+    for row in rows[1:]:
+        if len(row) >= 3 and row[2].strip():
+            posts.append({
+                "날짜": row[0] if len(row) > 0 else "",
+                "slug": row[1] if len(row) > 1 else "",
+                "제목": row[2] if len(row) > 2 else "",
+                "해시태그": row[3] if len(row) > 3 else "",
+                "요약": row[4] if len(row) > 4 else "",
+                "본문HTML": row[5] if len(row) > 5 else "",
+            })
+    return list(reversed(posts))
+
+
+def save_viral_post(slug, title, hashtags, summary, html_body):
+    """새 게시글 구글시트에 저장"""
+    ws = get_viral_sheet()
+    if not ws:
+        return False
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    ws.append_row([now, slug, title, hashtags, summary, html_body])
+    return True
+
+
+def delete_viral_post(slug):
+    """slug로 게시글 구글시트에서 삭제"""
+    ws = get_viral_sheet()
+    if not ws:
+        return False
+    rows = ws.get_all_values()
+    for i, row in enumerate(rows):
+        if len(row) > 1 and row[1] == slug:
+            ws.delete_rows(i + 1)
+            return True
+    return False
+
+
+def make_slug(title):
+    """제목에서 URL slug 생성 (타임스탬프 + 제목)"""
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    slug_title = re.sub(r'[^\w가-힣]', '-', title).strip('-')
+    slug_title = re.sub(r'-+', '-', slug_title)[:40]
+    return f"{ts}-{slug_title}"
+
+
+def generate_post_html(post):
+    """개별 포스트 전체 HTML 생성 (Naver SEO 최적화)"""
+    tags = [t.strip() for t in post["해시태그"].split(",") if t.strip()]
+    tag_meta = ", ".join(tags)
+    tag_header_html = "".join(
+        f'<span class="tag">#{t}</span>' for t in tags)
+    body = post.get("본문HTML", "") or ""
+    title_esc = post["제목"].replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+    summary_esc = post["요약"].replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')[:160]
+    slug = post["slug"]
+    date_str = post["날짜"]
+    return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>{title_esc} | 바이럴 백과사전 | 알리고미디어</title>
+<meta name="description" content="{summary_esc}">
+<meta name="keywords" content="{tag_meta}, 바이럴마케팅, 알리고미디어">
+<meta name="robots" content="index,follow">
+<link rel="canonical" href="https://aligomedia.co.kr/blog/{slug}/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="{title_esc}">
+<meta property="og:description" content="{summary_esc}">
+<meta property="og:url" content="https://aligomedia.co.kr/blog/{slug}/">
+<meta property="og:site_name" content="알리고미디어">
+<link rel="icon" type="image/png" href="https://aligomedia.co.kr/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+<style>
+*{{box-sizing:border-box;margin:0;padding:0;}}
+body{{font-family:'Noto Sans KR',sans-serif;background:#fff;color:#1a1a1a;line-height:1.75;font-size:16px;}}
+header{{position:sticky;top:0;background:rgba(255,255,255,0.98);backdrop-filter:blur(10px);padding:0 5%;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #eee;z-index:1000;height:80px;}}
+.logo-area img{{height:60px;width:auto;}}
+.nav-menu{{display:flex;gap:2rem;}}
+.nav-menu a{{text-decoration:none;color:#1a1a1a;font-weight:700;font-size:0.9rem;padding:8px 12px;transition:0.3s;}}
+.nav-menu a:hover,.nav-menu a.active{{color:#2e4a8f;}}
+.post-header{{background:linear-gradient(135deg,#2e4a8f 0%,#1a2f6b 100%);color:#fff;padding:70px 5% 50px;text-align:center;}}
+.post-header .tags{{display:flex;justify-content:center;flex-wrap:wrap;gap:8px;margin-bottom:20px;}}
+.tag{{background:rgba(255,255,255,0.2);color:#fff;font-size:0.8rem;font-weight:700;padding:4px 12px;border-radius:20px;}}
+.post-header h1{{font-size:clamp(1.6rem,3.5vw,2.5rem);font-weight:900;letter-spacing:-1px;line-height:1.3;margin-bottom:14px;max-width:800px;margin-left:auto;margin-right:auto;}}
+.post-header .meta{{font-size:0.85rem;opacity:0.75;}}
+.post-container{{max-width:800px;margin:0 auto;padding:60px 5% 80px;}}
+.post-summary{{background:#f4f6fb;border-left:4px solid #2e4a8f;padding:18px 22px;border-radius:0 12px 12px 0;margin-bottom:40px;font-size:1rem;color:#333;font-style:italic;line-height:1.7;}}
+.post-body{{font-size:1rem;line-height:1.85;color:#222;}}
+.post-body h1,.post-body h2,.post-body h3{{margin:1.8em 0 0.6em;font-weight:900;letter-spacing:-0.5px;}}
+.post-body p{{margin-bottom:1.2em;}}
+.post-body ul,.post-body ol{{margin:1em 0 1.2em 1.5em;}}
+.post-body li{{margin-bottom:0.4em;}}
+.post-body blockquote{{border-left:4px solid #2e4a8f;padding:12px 18px;background:#f4f6fb;margin:1.5em 0;color:#444;}}
+.post-body img{{max-width:100%;border-radius:8px;margin:1em 0;}}
+.post-body strong{{color:#1a1a1a;font-weight:800;}}
+.post-footer{{border-top:1px solid #eee;padding:40px 5%;text-align:center;}}
+.back-btn{{display:inline-block;background:#2e4a8f;color:#fff;font-weight:700;font-size:0.9rem;padding:12px 28px;border-radius:8px;text-decoration:none;transition:0.3s;}}
+.back-btn:hover{{background:#1a2f6b;}}
+footer{{padding:40px 5%;background:#fff;border-top:1px solid #eee;}}
+.footer-content{{max-width:1100px;margin:0 auto;}}
+.footer-info{{font-size:0.83rem;color:#555;line-height:1.8;}}
+.footer-copy{{margin-top:12px;font-size:0.78rem;color:#bbb;}}
+@media(max-width:768px){{.nav-menu{{gap:1rem;}}.nav-menu a{{font-size:0.8rem;padding:6px 8px;}}}}
+</style>
+</head>
+<body>
+<header>
+<div class="logo-area">
+<a href="https://aligomedia.co.kr"><img src="https://aligomedia.co.kr/image_4.png" alt="알리고미디어 로고" height="60"></a>
+</div>
+<nav class="nav-menu">
+<a href="https://aligomedia.co.kr/#pr-section">언론보도대행</a>
+<a href="https://aligomedia.co.kr/#review-section">리뷰마케팅</a>
+<a href="https://aligomedia.co.kr/#process-section">업무프로세스</a>
+<a href="/blog/" class="active">바이럴 백과사전</a>
+</nav>
+</header>
+<section class="post-header">
+<div class="tags">{tag_header_html}</div>
+<h1>{post["제목"]}</h1>
+<div class="meta">{date_str}</div>
+</section>
+<main class="post-container">
+<div class="post-summary">{post["요약"]}</div>
+<div class="post-body">{body}</div>
+</main>
+<div class="post-footer">
+<a href="/blog/" class="back-btn">← 목록으로 돌아가기</a>
+</div>
+<footer>
+<div class="footer-content">
+<div class="footer-info">
+<div style="font-weight:800;font-size:1rem;margin-bottom:8px;">알리고미디어</div>
+대표 : 박철규, 한용범 | 사업자등록번호 : 161-22-02310<br>
+소재지 : 서울 마포구 양화로 64, 8층 LS-814호 | Email : helper@aligomedia.kr
+<div class="footer-copy">© Aligo Media. All rights reserved.</div>
+</div>
+</div>
+</footer>
+</body>
+</html>"""
+
+
+def generate_blog_index_html(posts):
+    """블로그 인덱스 HTML 생성 (최신순 카드 목록)"""
+    if not posts:
+        cards_html = """        <div class="empty-state" style="grid-column:1/-1;">
+            <div class="icon">&#x270D;</div>
+            <p>아직 게시글이 없습니다.<br>첫 번째 글이 곧 올라올 예정입니다!</p>
+        </div>"""
+    else:
+        cards = []
+        for p in posts:
+            tags = [t.strip() for t in p["해시태그"].split(",") if t.strip()]
+            tag_html = "".join(
+                f'<span class="card-tag">#{t}</span>' for t in tags[:4])
+            title_esc = p["제목"].replace('<', '&lt;').replace('>', '&gt;')
+            summary_esc = p["요약"].replace('<', '&lt;').replace('>', '&gt;')
+            cards.append(f"""        <article class="post-card">
+            <div class="card-body">
+                <div class="card-tags">{tag_html}</div>
+                <a class="card-title" href="/blog/{p["slug"]}/">{title_esc}</a>
+                <p class="card-summary">{summary_esc}</p>
+                <div class="card-meta">
+                    <span>{p["날짜"][:10]}</span>
+                    <a class="card-read" href="/blog/{p["slug"]}/">자세히 읽기 &rarr;</a>
+                </div>
+            </div>
+        </article>""")
+        cards_html = "\n".join(cards)
+
+    return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>바이럴 백과사전 | 알리고미디어</title>
+<meta name="description" content="언론보도, 리뷰마케팅, 바이럴 마케팅에 관한 실전 정보를 알리고미디어가 정리합니다.">
+<meta name="keywords" content="바이럴마케팅, 언론보도대행, 리뷰마케팅, 쿠팡리뷰, 보도자료, 알리고미디어">
+<meta name="robots" content="index,follow">
+<link rel="canonical" href="https://aligomedia.co.kr/blog/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="바이럴 백과사전 | 알리고미디어">
+<meta property="og:description" content="언론보도, 리뷰마케팅, 바이럴 마케팅에 관한 실전 정보를 알리고미디어가 정리합니다.">
+<meta property="og:url" content="https://aligomedia.co.kr/blog/">
+<meta property="og:site_name" content="알리고미디어">
+<link rel="icon" type="image/png" href="https://aligomedia.co.kr/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+<style>
+*{{box-sizing:border-box;margin:0;padding:0;}}
+html{{scroll-behavior:smooth;}}
+body{{font-family:'Noto Sans KR',sans-serif;background:#fff;color:#1a1a1a;line-height:1.7;font-size:16px;}}
+header{{position:sticky;top:0;background:rgba(255,255,255,0.98);backdrop-filter:blur(10px);padding:0 5%;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #eee;z-index:1000;height:80px;}}
+.logo-area img{{height:60px;width:auto;display:block;}}
+.nav-menu{{display:flex;gap:2rem;}}
+.nav-menu a{{text-decoration:none;color:#1a1a1a;font-weight:700;font-size:0.9rem;padding:8px 12px;transition:0.3s;}}
+.nav-menu a:hover,.nav-menu a.active{{color:#2e4a8f;}}
+.page-hero{{background:linear-gradient(135deg,#2e4a8f 0%,#1a2f6b 100%);color:#fff;text-align:center;padding:70px 5% 60px;}}
+.page-hero h1{{font-size:clamp(1.8rem,4vw,2.8rem);font-weight:900;letter-spacing:-1px;margin-bottom:14px;}}
+.page-hero p{{font-size:1.05rem;opacity:0.85;max-width:600px;margin:0 auto;}}
+.blog-container{{max-width:1100px;margin:0 auto;padding:60px 5%;}}
+.blog-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:32px;}}
+.post-card{{border:1px solid #eee;border-radius:16px;overflow:hidden;transition:box-shadow 0.3s,transform 0.3s;display:flex;flex-direction:column;}}
+.post-card:hover{{box-shadow:0 8px 32px rgba(46,74,143,0.12);transform:translateY(-4px);}}
+.card-body{{padding:24px;flex:1;display:flex;flex-direction:column;}}
+.card-tags{{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}}
+.card-tag{{background:#eef1fa;color:#2e4a8f;font-size:0.75rem;font-weight:700;padding:4px 10px;border-radius:20px;}}
+.card-title{{font-size:1.05rem;font-weight:900;letter-spacing:-0.3px;margin-bottom:10px;line-height:1.4;color:#1a1a1a;text-decoration:none;display:block;}}
+.card-title:hover{{color:#2e4a8f;}}
+.card-summary{{font-size:0.88rem;color:#666;line-height:1.65;flex:1;margin-bottom:18px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}}
+.card-meta{{font-size:0.8rem;color:#aaa;display:flex;justify-content:space-between;align-items:center;border-top:1px solid #f0f0f0;padding-top:14px;margin-top:auto;}}
+.card-read{{color:#2e4a8f;font-weight:700;font-size:0.83rem;text-decoration:none;}}
+.card-read:hover{{text-decoration:underline;}}
+.empty-state{{text-align:center;padding:80px 20px;color:#aaa;}}
+.empty-state .icon{{font-size:3.5rem;margin-bottom:16px;}}
+.empty-state p{{font-size:1rem;}}
+footer{{padding:50px 5%;background:#fff;border-top:1px solid #eee;}}
+.footer-content{{max-width:1100px;margin:0 auto;}}
+.footer-info{{font-size:0.83rem;color:#555;line-height:1.8;}}
+.footer-copy{{margin-top:20px;font-size:0.78rem;color:#bbb;}}
+@media(max-width:768px){{.nav-menu{{gap:1rem;}}.nav-menu a{{font-size:0.8rem;padding:6px 8px;}}.blog-grid{{grid-template-columns:1fr;}}}}
+</style>
+</head>
+<body>
+<header>
+<div class="logo-area">
+<a href="https://aligomedia.co.kr"><img src="https://aligomedia.co.kr/image_4.png" alt="알리고미디어 로고" height="60"></a>
+</div>
+<nav class="nav-menu">
+<a href="https://aligomedia.co.kr/#pr-section">언론보도대행</a>
+<a href="https://aligomedia.co.kr/#review-section">리뷰마케팅</a>
+<a href="https://aligomedia.co.kr/#process-section">업무프로세스</a>
+<a href="/blog/" class="active">바이럴 백과사전</a>
+</nav>
+</header>
+<section class="page-hero">
+<h1>&#128214; 바이럴 백과사전</h1>
+<p>언론보도, 리뷰마케팅, 바이럴 마케팅의 실전 노하우를 알리고미디어가 직접 정리합니다.</p>
+</section>
+<main class="blog-container">
+<div class="blog-grid">
+{cards_html}
+</div>
+</main>
+<footer>
+<div class="footer-content">
+<div class="footer-info">
+<div style="font-weight:800;font-size:1rem;margin-bottom:8px;">알리고미디어</div>
+대표 : 박철규, 한용범 | 사업자등록번호 : 161-22-02310<br>
+소재지 : 서울 마포구 양화로 64, 8층 LS-814호 | Email : helper@aligomedia.kr
+<div class="footer-copy">© Aligo Media. All rights reserved.</div>
+</div>
+</div>
+</footer>
+</body>
+</html>"""
+
+
+def deploy_blog_incremental(token, site_id, new_files):
+    """
+    Netlify 해시 기반 증분 배포.
+    new_files: {path: bytes} (예: {"blog/index.html": b"...", "blog/slug/index.html": b"..."})
+    기존 사이트 파일을 유지하면서 지정된 파일만 추가/갱신한다.
+    """
+    import hashlib as _hl
+    headers_auth = {"Authorization": f"Bearer {token}"}
+
+    # 1. 최신 배포 파일 목록 가져오기
+    try:
+        r = requests.get(
+            f"https://api.netlify.com/api/v1/sites/{site_id}/deploys?per_page=10",
+            headers=headers_auth, timeout=20)
+        deploys = r.json() if r.status_code == 200 else []
+        latest_id = None
+        for d in (deploys if isinstance(deploys, list) else []):
+            if d.get("state") == "ready":
+                latest_id = d["id"]
+                break
+
+        existing_files = {}
+        if latest_id:
+            r2 = requests.get(
+                f"https://api.netlify.com/api/v1/deploys/{latest_id}/files",
+                headers=headers_auth, timeout=20)
+            if r2.status_code == 200:
+                for f in r2.json():
+                    path = f.get("id", "").lstrip("/")
+                    sha = f.get("sha", "")
+                    if path and sha:
+                        existing_files[path] = sha
+    except Exception as e:
+        return False, f"기존 배포 파일 조회 실패: {e}"
+
+    # 2. 새 파일 SHA1 계산
+    new_sha = {}
+    content_by_sha = {}
+    for path, content in new_files.items():
+        path_clean = path.lstrip("/")
+        sha1 = _hl.sha1(content).hexdigest()
+        new_sha[path_clean] = sha1
+        content_by_sha[sha1] = (path_clean, content)
+
+    # 3. 병합 (기존 유지 + 새 파일 덮어쓰기)
+    merged = {**existing_files, **new_sha}
+
+    # 4. 새 배포 생성
+    try:
+        r3 = requests.post(
+            f"https://api.netlify.com/api/v1/sites/{site_id}/deploys",
+            headers={**headers_auth, "Content-Type": "application/json"},
+            json={"files": {f"/{k}": v for k, v in merged.items()}},
+            timeout=30)
+        if r3.status_code not in [200, 201]:
+            return False, f"배포 생성 실패: {r3.status_code} {r3.text[:300]}"
+        deploy_data = r3.json()
+        new_deploy_id = deploy_data["id"]
+        required = deploy_data.get("required", [])
+    except Exception as e:
+        return False, f"배포 생성 오류: {e}"
+
+    # 5. 필요한 파일만 업로드
+    upload_errors = []
+    for sha1 in required:
+        if sha1 not in content_by_sha:
+            continue
+        file_path, file_content = content_by_sha[sha1]
+        try:
+            ru = requests.put(
+                f"https://api.netlify.com/api/v1/deploys/{new_deploy_id}/files/{file_path}",
+                headers={**headers_auth, "Content-Type": "application/octet-stream"},
+                data=file_content, timeout=30)
+            if ru.status_code not in [200, 201]:
+                upload_errors.append(f"{file_path}: {ru.status_code}")
+        except Exception as e:
+            upload_errors.append(f"{file_path}: {e}")
+
+    if upload_errors:
+        return False, "일부 파일 업로드 실패:\n" + "\n".join(upload_errors)
+    return True, f"배포 성공 (deploy_id: {new_deploy_id})"
+
+# ─────────────────────────────────────────────
+
 def parse_reviews(text):
     delim = re.compile(r'^\s*(?:\((\d+)\)|(\d+)[.\)]|(\d+))\s*$', re.MULTILINE)
     markers = [(int(m.group(1) or m.group(2) or m.group(3)), m.start(), m.end()) for m in delim.finditer(text)]
@@ -1723,6 +2107,7 @@ with st.sidebar:
         "🌐 홈페이지 자동 개선",
         "📊 함소아 보고서",
         "🖼️ 배경 흰색 변환",
+        "📖 바이럴 백과사전",
     ], label_visibility="collapsed")
     st.markdown("---")
     st.caption("버즈필터 업무 자동화 시스템")
@@ -2779,3 +3164,156 @@ HTML:
                         )
                     except Exception as _ze:
                         st.error(f"ZIP 생성 실패: {_ze}")
+
+# ─────────────────────────────────────────────
+# 📖 바이럴 백과사전 메뉴
+# ─────────────────────────────────────────────
+elif menu == "📖 바이럴 백과사전":
+    st.markdown("## 📖 바이럴 백과사전")
+    st.caption("게시글을 관리하고 aligomedia.co.kr/blog/ 에 발행합니다.")
+
+    _vb_tab1, _vb_tab2 = st.tabs(["📋 게시글 목록", "✍️ 새 글 작성"])
+
+    # ── 탭1: 게시글 목록 ──
+    with _vb_tab1:
+        st.markdown("### 📋 발행된 게시글")
+        with st.spinner("게시글 불러오는 중..."):
+            _vb_posts = get_viral_posts()
+
+        if not _vb_posts:
+            st.info("아직 게시된 글이 없습니다. '새 글 작성' 탭에서 첫 번째 글을 작성해보세요!")
+        else:
+            st.success(f"총 **{len(_vb_posts)}**개의 게시글이 있습니다.")
+            for _vb_p in _vb_posts:
+                with st.expander(f"📄 {_vb_p['제목']}  ·  {_vb_p['날짜'][:10]}"):
+                    st.caption(f"🔑 slug: `{_vb_p['slug']}`")
+                    if _vb_p["해시태그"]:
+                        st.caption(f"🏷️ 태그: {_vb_p['해시태그']}")
+                    if _vb_p["요약"]:
+                        st.caption(f"📝 요약: {_vb_p['요약']}")
+                    st.markdown(
+                        f"[🔗 게시글 보기 (새 창)](https://aligomedia.co.kr/blog/{_vb_p['slug']}/)",
+                        unsafe_allow_html=True)
+                    if st.button("🗑️ 삭제", key=f"vb_del_{_vb_p['slug']}", type="secondary"):
+                        with st.spinner("삭제 중..."):
+                            _del_ok = delete_viral_post(_vb_p["slug"])
+                            if _del_ok:
+                                _remaining = [x for x in _vb_posts if x["slug"] != _vb_p["slug"]]
+                                _del_idx_html = generate_blog_index_html(_remaining).encode("utf-8")
+                                _vtok = st.secrets.get("NETLIFY_TOKEN", "")
+                                _vsid = st.secrets.get("NETLIFY_SITE_ID", "")
+                                if _vtok and _vsid:
+                                    deploy_blog_incremental(
+                                        _vtok, _vsid,
+                                        {"blog/index.html": _del_idx_html})
+                                st.success("✅ 삭제 완료!")
+                                st.rerun()
+                            else:
+                                st.error("삭제 실패. 시트 연결을 확인해주세요.")
+
+    # ── 탭2: 새 글 작성 ──
+    with _vb_tab2:
+        st.markdown("### ✍️ 새 글 작성")
+
+        _vb_title = st.text_input(
+            "📌 제목 *",
+            placeholder="예: 쿠팡 리뷰 마케팅 완벽 가이드 2025",
+            key="vb_title")
+        _vb_tags = st.text_input(
+            "🏷️ 해시태그 (쉼표로 구분)",
+            placeholder="예: 쿠팡리뷰, 리뷰마케팅, 바이럴마케팅",
+            key="vb_tags")
+        _vb_summary = st.text_area(
+            "📝 요약 (검색 결과에 표시됨) *",
+            placeholder="이 글에서 다루는 내용을 2~3줄로 요약해주세요. 네이버 검색 결과에 노출됩니다.",
+            height=90, key="vb_summary")
+
+        st.markdown("**📄 본문** — 글자 크기·색상·정렬·볼드 등 자유롭게 편집하세요.")
+        try:
+            from streamlit_quill import st_quill
+            _vb_body = st_quill(
+                placeholder="여기에 본문을 작성하세요...",
+                html=True,
+                key="vb_quill_editor"
+            )
+        except ImportError:
+            st.warning("⚠️ streamlit-quill 미설치 상태입니다. 재배포 후 사용 가능합니다. 임시로 HTML 직접 입력을 사용합니다.")
+            _vb_body = st.text_area(
+                "본문 (HTML 직접 입력 — 임시)",
+                height=300, key="vb_body_fallback")
+
+        st.markdown("---")
+        _vb_col1, _vb_col2 = st.columns([2, 1])
+        with _vb_col1:
+            _vb_publish = st.button(
+                "🚀 발행하기",
+                key="vb_publish_btn",
+                type="primary",
+                use_container_width=True)
+        with _vb_col2:
+            st.caption("발행 시 홈페이지에 즉시 반영됩니다.")
+
+        if _vb_publish:
+            _vb_err = []
+            if not (_vb_title or "").strip():
+                _vb_err.append("제목을 입력해주세요.")
+            if not (_vb_summary or "").strip():
+                _vb_err.append("요약을 입력해주세요.")
+            if not (_vb_body or "").strip() or (_vb_body or "").strip() in ["<p><br></p>", "<p></p>"]:
+                _vb_err.append("본문을 작성해주세요.")
+            if _vb_err:
+                for _e in _vb_err:
+                    st.error(_e)
+            else:
+                with st.spinner("게시글 발행 중... (구글시트 저장 → HTML 생성 → Netlify 배포)"):
+                    _vb_slug = make_slug(_vb_title.strip())
+                    _vb_post_data = {
+                        "날짜": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "slug": _vb_slug,
+                        "제목": _vb_title.strip(),
+                        "해시태그": (_vb_tags or "").strip(),
+                        "요약": _vb_summary.strip(),
+                        "본문HTML": _vb_body or "",
+                    }
+
+                    # 구글시트 저장
+                    _vb_saved = save_viral_post(
+                        _vb_slug,
+                        _vb_title.strip(),
+                        (_vb_tags or "").strip(),
+                        _vb_summary.strip(),
+                        _vb_body or ""
+                    )
+
+                    if _vb_saved:
+                        # HTML 생성
+                        _vb_post_html = generate_post_html(_vb_post_data).encode("utf-8")
+                        _vb_all_posts = get_viral_posts()
+                        _vb_idx_html = generate_blog_index_html(_vb_all_posts).encode("utf-8")
+
+                        # Netlify 증분 배포
+                        _vtok2 = st.secrets.get("NETLIFY_TOKEN", "")
+                        _vsid2 = st.secrets.get("NETLIFY_SITE_ID", "")
+
+                        if _vtok2 and _vsid2:
+                            _vb_ok, _vb_msg = deploy_blog_incremental(
+                                _vtok2, _vsid2,
+                                {
+                                    f"blog/{_vb_slug}/index.html": _vb_post_html,
+                                    "blog/index.html": _vb_idx_html,
+                                }
+                            )
+                            if _vb_ok:
+                                st.success("✅ 발행 완료!")
+                                st.markdown(
+                                    f"🔗 **게시글 주소:** https://aligomedia.co.kr/blog/{_vb_slug}/")
+                                st.balloons()
+                            else:
+                                st.error(f"Netlify 배포 실패: {_vb_msg}")
+                                st.info("구글시트에는 저장되었습니다. Netlify 설정을 확인해주세요.")
+                        else:
+                            st.warning(
+                                "Netlify 시크릿 설정이 없어 홈페이지 배포는 건너뜁니다.\n"
+                                "구글시트에는 저장되었습니다.")
+                    else:
+                        st.error("구글시트 저장 실패. 시트 연결을 확인해주세요.")
