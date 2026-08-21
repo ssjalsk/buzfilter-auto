@@ -723,6 +723,21 @@ def deploy_blog_incremental(token, site_id, new_files):
         return False, "일부 파일 업로드 실패:\n" + "\n".join(upload_errors)
     return True, f"배포 성공 (deploy_id: {new_deploy_id})"
 
+
+def upload_blog_image(token, site_id, image_bytes, original_filename):
+    """
+    블로그 이미지를 Netlify에 업로드하고 공개 URL을 반환.
+    blog/images/{timestamp}-{filename} 경로에 저장.
+    """
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    # 파일명 안전하게 처리
+    safe_name = re.sub(r'[^\w.\-]', '_', original_filename)
+    img_path = f"blog/images/{ts}-{safe_name}"
+    ok, msg = deploy_blog_incremental(token, site_id, {img_path: image_bytes})
+    if ok:
+        return f"https://aligomedia.co.kr/{img_path}", "성공"
+    return None, msg
+
 # ─────────────────────────────────────────────
 
 def parse_reviews(text):
@@ -3228,7 +3243,38 @@ elif menu == "📖 바이럴 백과사전":
             placeholder="이 글에서 다루는 내용을 2~3줄로 요약해주세요. 네이버 검색 결과에 노출됩니다.",
             height=90, key="vb_summary")
 
-        st.markdown("**📄 본문** — 글자 크기·색상·정렬·볼드 등 자유롭게 편집하세요.")
+        # ── 이미지 업로드 섹션 ──
+        with st.expander("🖼️ 이미지 업로드 (본문에 삽입할 이미지)"):
+            st.caption(
+                "이미지를 업로드하면 Netlify에 호스팅하고 URL을 발급합니다.\n"
+                "URL 복사 → 본문 에디터의 🖼 버튼 클릭 → URL 붙여넣기")
+            _vb_img_files = st.file_uploader(
+                "이미지 파일 선택 또는 드래그",
+                type=["jpg", "jpeg", "png", "gif", "webp"],
+                accept_multiple_files=True,
+                key="vb_img_uploader"
+            )
+            if _vb_img_files:
+                if st.button("☁️ Netlify에 업로드", key="vb_img_upload_btn"):
+                    _vtok_img = st.secrets.get("NETLIFY_TOKEN", "")
+                    _vsid_img = st.secrets.get("NETLIFY_SITE_ID", "")
+                    if not _vtok_img or not _vsid_img:
+                        st.error("Netlify 시크릿 설정이 없습니다.")
+                    else:
+                        for _img_f in _vb_img_files:
+                            with st.spinner(f"{_img_f.name} 업로드 중..."):
+                                _img_bytes = _img_f.read()
+                                _img_url, _img_msg = upload_blog_image(
+                                    _vtok_img, _vsid_img, _img_bytes, _img_f.name)
+                            if _img_url:
+                                st.success(f"✅ {_img_f.name} 업로드 완료!")
+                                st.image(_img_url, width=240)
+                                st.code(_img_url, language=None)
+                                st.caption("👆 URL 복사 → 에디터 🖼 버튼 → URL 붙여넣기")
+                            else:
+                                st.error(f"❌ {_img_f.name} 실패: {_img_msg}")
+
+        st.markdown("**📄 본문** — 글자 크기·색상·정렬·볼드·이미지 삽입 등 자유롭게 편집하세요.")
         try:
             from streamlit_quill import st_quill
             _vb_body = st_quill(
