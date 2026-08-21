@@ -430,6 +430,25 @@ def make_slug(title):
     return f"{ts}-{slug_title}"
 
 
+@st.cache_data(ttl=300)
+def get_view_count(slug):
+    """hits.seeyoufarm.com에서 조회수 가져오기 (5분 캐시)"""
+    import urllib.parse as _ulp
+    try:
+        encoded = _ulp.quote(
+            f"https://aligomedia.co.kr/blog/{slug}/", safe="")
+        r = requests.get(
+            f"https://hits.seeyoufarm.com/api/count/incr/badge.svg?url={encoded}",
+            timeout=8)
+        if r.status_code == 200:
+            nums = re.findall(r">(\d+)<", r.text)
+            valid = [int(n) for n in nums if n.isdigit() and len(n) <= 7]
+            return max(valid) if valid else 0
+        return 0
+    except Exception:
+        return 0
+
+
 def generate_post_html(post):
     """개별 포스트 전체 HTML 생성 (Naver SEO 최적화)"""
     tags = [t.strip() for t in post["해시태그"].split(",") if t.strip()]
@@ -441,6 +460,7 @@ def generate_post_html(post):
     summary_esc = post["요약"].replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')[:160]
     slug = post["slug"]
     date_str = post["날짜"]
+    hits_url = f"https%3A%2F%2Faligomedia.co.kr%2Fblog%2F{slug}%2F"
     return f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -488,6 +508,7 @@ header{{position:sticky;top:0;background:rgba(255,255,255,0.98);backdrop-filter:
 .post-body p.ql-align-center{{text-align:center;}}
 .post-body p.ql-align-right{{text-align:right;}}
 .post-body p.ql-align-justify{{text-align:justify;}}
+.post-views{{text-align:right;padding:16px 0 8px;}}
 .post-footer{{border-top:1px solid #eee;padding:40px 5%;text-align:center;}}
 .back-btn{{display:inline-block;background:#2e4a8f;color:#fff;font-weight:700;font-size:0.9rem;padding:12px 28px;border-radius:8px;text-decoration:none;transition:0.3s;}}
 .back-btn:hover{{background:#1a2f6b;}}
@@ -519,6 +540,9 @@ footer{{padding:40px 5%;background:#fff;border-top:1px solid #eee;}}
 <div class="post-summary">{post["요약"]}</div>
 <div class="post-body">{body}</div>
 </main>
+<div class="post-views">
+<img src="https://hits.seeyoufarm.com/api/count/incr/badge.svg?url={hits_url}&count_bg=%232e4a8f&title_bg=%23555555&title=%EC%A1%B0%ED%9A%8C%EC%88%98&edge_flat=false" alt="조회수" height="22" loading="lazy">
+</div>
 <div class="post-footer">
 <a href="/blog/" class="back-btn">← 목록으로 돌아가기</a>
 </div>
@@ -3304,8 +3328,10 @@ elif menu == "📖 바이럴 백과사전":
         else:
             st.success(f"총 **{len(_vb_posts)}**개의 게시글이 있습니다.")
             for _vb_p in _vb_posts:
-                with st.expander(f"📄 {_vb_p['제목']}  ·  {_vb_p['날짜'][:10]}"):
+                _vc = get_view_count(_vb_p["slug"])
+                with st.expander(f"📄 {_vb_p['제목']}  ·  {_vb_p['날짜'][:10]}  |  👁 {_vc:,}회"):
                     st.caption(f"🔑 slug: `{_vb_p['slug']}`")
+                    st.caption(f"👁 조회수: **{_vc:,}회** (5분 캐시)")
                     if _vb_p["해시태그"]:
                         st.caption(f"🏷️ 태그: {_vb_p['해시태그']}")
                     if _vb_p["요약"]:
