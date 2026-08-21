@@ -347,6 +347,11 @@ def deploy_to_netlify(html_content, site_id, token, extra_files=None):
 VIRAL_SHEET_ID = "1CtD6VVtmiQNz90mKJFfuPq8-LMowLHg3NZPnoqwpISE"  # 버즈필터 시트 (서비스 계정 권한 있음)
 VIRAL_TAB_NAME = "바이럴백과사전"
 
+def extract_first_image(html_content):
+    """HTML 본문에서 첫 번째 이미지 URL 추출 (썸네일용)"""
+    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html_content or "")
+    return m.group(1) if m else None
+
 def get_viral_sheet():
     """바이럴 백과사전 구글시트 탭 연결. 없으면 자동 생성."""
     try:
@@ -477,6 +482,12 @@ header{{position:sticky;top:0;background:rgba(255,255,255,0.98);backdrop-filter:
 .post-body blockquote{{border-left:4px solid #2e4a8f;padding:12px 18px;background:#f4f6fb;margin:1.5em 0;color:#444;}}
 .post-body img{{max-width:100%;border-radius:8px;margin:1em 0;}}
 .post-body strong{{color:#1a1a1a;font-weight:800;}}
+.post-body .ql-align-center{{text-align:center;}}
+.post-body .ql-align-right{{text-align:right;}}
+.post-body .ql-align-justify{{text-align:justify;}}
+.post-body p.ql-align-center{{text-align:center;}}
+.post-body p.ql-align-right{{text-align:right;}}
+.post-body p.ql-align-justify{{text-align:justify;}}
 .post-footer{{border-top:1px solid #eee;padding:40px 5%;text-align:center;}}
 .back-btn{{display:inline-block;background:#2e4a8f;color:#fff;font-weight:700;font-size:0.9rem;padding:12px 28px;border-radius:8px;text-decoration:none;transition:0.3s;}}
 .back-btn:hover{{background:#1a2f6b;}}
@@ -540,7 +551,14 @@ def generate_blog_index_html(posts):
                 f'<span class="card-tag">#{t}</span>' for t in tags[:4])
             title_esc = p["제목"].replace('<', '&lt;').replace('>', '&gt;')
             summary_esc = p["요약"].replace('<', '&lt;').replace('>', '&gt;')
+            # 썸네일: 본문 첫 이미지 추출
+            thumb_url = extract_first_image(p.get("본문HTML", ""))
+            if thumb_url:
+                thumb_html = f'<div class="card-thumb"><img src="{thumb_url}" alt="{title_esc}" loading="lazy"></div>'
+            else:
+                thumb_html = '<div class="card-thumb-placeholder">📖</div>'
             cards.append(f"""        <article class="post-card">
+            {thumb_html}
             <div class="card-body">
                 <div class="card-tags">{tag_html}</div>
                 <a class="card-title" href="/blog/{p["slug"]}/">{title_esc}</a>
@@ -587,6 +605,10 @@ header{{position:sticky;top:0;background:rgba(255,255,255,0.98);backdrop-filter:
 .blog-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:32px;}}
 .post-card{{border:1px solid #eee;border-radius:16px;overflow:hidden;transition:box-shadow 0.3s,transform 0.3s;display:flex;flex-direction:column;}}
 .post-card:hover{{box-shadow:0 8px 32px rgba(46,74,143,0.12);transform:translateY(-4px);}}
+.card-thumb{{width:100%;height:200px;overflow:hidden;background:#eef1fa;}}
+.card-thumb img{{width:100%;height:100%;object-fit:cover;display:block;transition:transform 0.4s;}}
+.post-card:hover .card-thumb img{{transform:scale(1.05);}}
+.card-thumb-placeholder{{width:100%;height:200px;background:linear-gradient(135deg,#2e4a8f22,#2e4a8f44);display:flex;align-items:center;justify-content:center;font-size:2.5rem;}}
 .card-body{{padding:24px;flex:1;display:flex;flex-direction:column;}}
 .card-tags{{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}}
 .card-tag{{background:#eef1fa;color:#2e4a8f;font-size:0.75rem;font-weight:700;padding:4px 10px;border-radius:20px;}}
