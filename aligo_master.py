@@ -781,6 +781,28 @@ def process_quill_images(html_content, token, site_id):
 
     return result, uploaded
 
+
+def blocks_to_html(blocks):
+    """
+    블록 목록 → 단일 HTML 문자열.
+    텍스트 블록: Quill HTML 그대로 사용
+    이미지 블록: <img> 태그 생성
+    """
+    parts = []
+    for blk in blocks:
+        if blk["type"] == "text":
+            content = st.session_state.get(f"__vbtxt_{blk['id']}", "").strip()
+            if content and content not in ("<p><br></p>", "<p></p>", ""):
+                parts.append(content)
+        elif blk["type"] == "image":
+            url = blk.get("url", "")
+            if url:
+                parts.append(
+                    f'<p style="text-align:center;margin:1.2em 0;">'
+                    f'<img src="{url}" style="max-width:100%;border-radius:8px;" alt="이미지">'
+                    f'</p>')
+    return "\n".join(parts)
+
 # ─────────────────────────────────────────────
 
 def parse_reviews(text):
@@ -3273,6 +3295,7 @@ elif menu == "📖 바이럴 백과사전":
     with _vb_tab2:
         st.markdown("### ✍️ 새 글 작성")
 
+        # 기본 정보
         _vb_title = st.text_input(
             "📌 제목 *",
             placeholder="예: 쿠팡 리뷰 마케팅 완벽 가이드 2025",
@@ -3286,26 +3309,125 @@ elif menu == "📖 바이럴 백과사전":
             placeholder="이 글에서 다루는 내용을 2~3줄로 요약해주세요. 네이버 검색 결과에 노출됩니다.",
             height=90, key="vb_summary")
 
-        st.info(
-            "📌 **이미지 삽입 방법** — "
-            "탐색기(파일 탐색기)에서 이미지 파일을 아래 에디터 안으로 **바로 끌어다 놓으세요.** "
-            "글↔이미지를 원하는 순서로 자유롭게 섞을 수 있습니다. "
-            "발행 시 이미지가 자동으로 서버에 업로드되고 URL로 변환됩니다.")
-        st.markdown("**📄 본문** — 글자 크기·색상·정렬·볼드·이미지 자유롭게 편집")
+        st.markdown("---")
+        st.markdown("**📄 본문 — 블록 에디터**")
+        st.caption("텍스트와 이미지를 원하는 순서로 자유롭게 쌓아가세요.")
+
+        # ── 블록 초기화 ──
+        import time as _time
+        if "vb_blocks" not in st.session_state:
+            st.session_state["vb_blocks"] = [
+                {"type": "text", "id": "blk_init", "url": None}
+            ]
+
+        _vb_blocks = st.session_state["vb_blocks"]
+        _vb_to_delete = None
+        _vb_move = None  # (idx, direction)
+
+        # ── 블록 렌더링 ──
         try:
-            from streamlit_quill import st_quill
-            _vb_body = st_quill(
-                placeholder="여기에 본문을 작성하세요...",
-                html=True,
-                key="vb_quill_editor"
-            )
+            from streamlit_quill import st_quill as _st_quill
+            _quill_ok = True
         except ImportError:
-            st.warning("⚠️ streamlit-quill 미설치 상태입니다. 재배포 후 사용 가능합니다. 임시로 HTML 직접 입력을 사용합니다.")
-            _vb_body = st.text_area(
-                "본문 (HTML 직접 입력 — 임시)",
-                height=300, key="vb_body_fallback")
+            _quill_ok = False
+
+        for _bi, _blk in enumerate(_vb_blocks):
+            _bid = _blk["id"]
+            # 컨트롤 행
+            _bc1, _bc2, _bc3, _bc4 = st.columns([1, 1, 9, 1])
+            with _bc1:
+                if st.button("↑", key=f"vbup_{_bid}", disabled=(_bi == 0), help="위로"):
+                    _vb_move = (_bi, "up")
+            with _bc2:
+                if st.button("↓", key=f"vbdn_{_bid}", disabled=(_bi == len(_vb_blocks) - 1), help="아래로"):
+                    _vb_move = (_bi, "down")
+            with _bc3:
+                if _blk["type"] == "text":
+                    st.caption(f"📝 텍스트 블록 {_bi + 1}")
+                else:
+                    st.caption(f"🖼️ 이미지 블록 {_bi + 1}")
+            with _bc4:
+                if st.button("✕", key=f"vbdel_{_bid}", help="삭제"):
+                    _vb_to_delete = _bi
+
+            # 블록 내용
+            if _blk["type"] == "text":
+                if _quill_ok:
+                    _raw = _st_quill(
+                        placeholder="텍스트 입력... (글자 크기·색상·정렬 모두 가능)",
+                        html=True,
+                        key=f"q_{_bid}"
+                    )
+                    # rerun 후에도 내용 보존
+                    _skey = f"__vbtxt_{_bid}"
+                    if _raw is not None:
+                        _clean = (_raw or "").strip()
+                        if _clean and _clean not in ("<p><br></p>", "<p></p>"):
+                            st.session_state[_skey] = _raw
+                else:
+                    _raw = st.text_area(
+                        "텍스트 입력", height=150,
+                        key=f"ta_{_bid}",
+                        value=st.session_state.get(f"__vbtxt_{_bid}", ""))
+                    if _raw:
+                        st.session_state[f"__vbtxt_{_bid}"] = _raw
+
+            elif _blk["type"] == "image":
+                _stored_url = _blk.get("url")
+                if _stored_url:
+                    st.image(_stored_url, width=420)
+                    if st.button("🔄 이미지 변경", key=f"vbchg_{_bid}"):
+                        _vb_blocks[_bi]["url"] = None
+                        st.rerun()
+                else:
+                    _img_file = st.file_uploader(
+                        "이미지 파일 선택 (jpg / png / gif / webp)",
+                        type=["jpg", "jpeg", "png", "gif", "webp"],
+                        key=f"imgup_{_bid}"
+                    )
+                    if _img_file:
+                        _vbtok = st.secrets.get("NETLIFY_TOKEN", "")
+                        _vbsid = st.secrets.get("NETLIFY_SITE_ID", "")
+                        with st.spinner(f"{_img_file.name} 업로드 중..."):
+                            _iurl, _imsg = upload_blog_image(
+                                _vbtok, _vbsid, _img_file.read(), _img_file.name)
+                        if _iurl:
+                            _vb_blocks[_bi]["url"] = _iurl
+                            st.image(_iurl, width=420)
+                            st.success("✅ 업로드 완료!")
+                            st.rerun()
+                        else:
+                            st.error(f"업로드 실패: {_imsg}")
+
+            st.markdown('<div style="height:6px"></div>', unsafe_allow_html=True)
+
+        # ── 블록 이동 / 삭제 처리 ──
+        if _vb_move:
+            _mi, _mdir = _vb_move
+            if _mdir == "up" and _mi > 0:
+                _vb_blocks[_mi], _vb_blocks[_mi - 1] = _vb_blocks[_mi - 1], _vb_blocks[_mi]
+            elif _mdir == "down" and _mi < len(_vb_blocks) - 1:
+                _vb_blocks[_mi], _vb_blocks[_mi + 1] = _vb_blocks[_mi + 1], _vb_blocks[_mi]
+            st.rerun()
+
+        if _vb_to_delete is not None:
+            _vb_blocks.pop(_vb_to_delete)
+            st.rerun()
+
+        # ── 블록 추가 버튼 ──
+        _badd1, _badd2 = st.columns(2)
+        with _badd1:
+            if st.button("➕ 텍스트 블록 추가", use_container_width=True, key="vb_add_text"):
+                _vb_blocks.append({"type": "text", "id": f"t{int(_time.time()*1000)}", "url": None})
+                st.rerun()
+        with _badd2:
+            if st.button("🖼️ 이미지 블록 추가", use_container_width=True, key="vb_add_img"):
+                _vb_blocks.append({"type": "image", "id": f"i{int(_time.time()*1000)}", "url": None})
+                st.rerun()
 
         st.markdown("---")
+
+        # ── 발행 버튼 ──
         _vb_col1, _vb_col2 = st.columns([2, 1])
         with _vb_col1:
             _vb_publish = st.button(
@@ -3317,29 +3439,20 @@ elif menu == "📖 바이럴 백과사전":
             st.caption("발행 시 홈페이지에 즉시 반영됩니다.")
 
         if _vb_publish:
+            _vb_body_final = blocks_to_html(_vb_blocks)
             _vb_err = []
             if not (_vb_title or "").strip():
                 _vb_err.append("제목을 입력해주세요.")
             if not (_vb_summary or "").strip():
                 _vb_err.append("요약을 입력해주세요.")
-            if not (_vb_body or "").strip() or (_vb_body or "").strip() in ["<p><br></p>", "<p></p>"]:
-                _vb_err.append("본문을 작성해주세요.")
+            if not _vb_body_final.strip():
+                _vb_err.append("본문 블록에 내용을 입력해주세요.")
             if _vb_err:
                 for _e in _vb_err:
                     st.error(_e)
             else:
                 _vtok2 = st.secrets.get("NETLIFY_TOKEN", "")
                 _vsid2 = st.secrets.get("NETLIFY_SITE_ID", "")
-                _vb_body_final = _vb_body or ""
-
-                # ── STEP 1: 에디터 내 base64 이미지 → Netlify 업로드 ──
-                _vb_img_count = _vb_body_final.count("data:image/")
-                if _vb_img_count > 0 and _vtok2 and _vsid2:
-                    with st.spinner(f"이미지 {_vb_img_count}장 서버 업로드 중..."):
-                        _vb_body_final, _uploaded_n = process_quill_images(
-                            _vb_body_final, _vtok2, _vsid2)
-                    if _uploaded_n > 0:
-                        st.success(f"🖼️ 이미지 {_uploaded_n}장 업로드 완료")
 
                 with st.spinner("게시글 저장 및 배포 중..."):
                     _vb_slug = make_slug(_vb_title.strip())
@@ -3352,7 +3465,6 @@ elif menu == "📖 바이럴 백과사전":
                         "본문HTML": _vb_body_final,
                     }
 
-                    # 구글시트 저장 (URL로 교체된 HTML 저장)
                     _vb_saved = save_viral_post(
                         _vb_slug,
                         _vb_title.strip(),
@@ -3362,7 +3474,6 @@ elif menu == "📖 바이럴 백과사전":
                     )
 
                     if _vb_saved:
-                        # HTML 생성
                         _vb_post_html = generate_post_html(_vb_post_data).encode("utf-8")
                         _vb_all_posts = get_viral_posts()
                         _vb_idx_html = generate_blog_index_html(_vb_all_posts).encode("utf-8")
@@ -3376,16 +3487,17 @@ elif menu == "📖 바이럴 백과사전":
                                 }
                             )
                             if _vb_ok:
+                                # 발행 후 블록 초기화
+                                st.session_state["vb_blocks"] = [
+                                    {"type": "text", "id": "blk_init", "url": None}]
                                 st.success("✅ 발행 완료!")
                                 st.markdown(
                                     f"🔗 **게시글 주소:** https://aligomedia.co.kr/blog/{_vb_slug}/")
                                 st.balloons()
                             else:
                                 st.error(f"Netlify 배포 실패: {_vb_msg}")
-                                st.info("구글시트에는 저장되었습니다. Netlify 설정을 확인해주세요.")
+                                st.info("구글시트에는 저장되었습니다.")
                         else:
-                            st.warning(
-                                "Netlify 시크릿 설정이 없어 홈페이지 배포는 건너뜁니다.\n"
-                                "구글시트에는 저장되었습니다.")
+                            st.warning("Netlify 시크릿 설정이 없어 홈페이지 배포는 건너뜁니다.\n구글시트에는 저장되었습니다.")
                     else:
                         st.error("구글시트 저장 실패. 시트 연결을 확인해주세요.")
