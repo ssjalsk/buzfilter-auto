@@ -729,14 +729,57 @@ def upload_blog_image(token, site_id, image_bytes, original_filename):
     블로그 이미지를 Netlify에 업로드하고 공개 URL을 반환.
     blog/images/{timestamp}-{filename} 경로에 저장.
     """
-    ts = datetime.now().strftime("%Y%m%d%H%M%S")
-    # 파일명 안전하게 처리
+    ts = datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
     safe_name = re.sub(r'[^\w.\-]', '_', original_filename)
     img_path = f"blog/images/{ts}-{safe_name}"
     ok, msg = deploy_blog_incremental(token, site_id, {img_path: image_bytes})
     if ok:
         return f"https://aligomedia.co.kr/{img_path}", "성공"
     return None, msg
+
+
+def process_quill_images(html_content, token, site_id):
+    """
+    Quill 에디터 HTML에 포함된 base64 이미지를 모두 추출해
+    Netlify에 업로드하고 URL로 교체한 HTML을 반환.
+    - 동일 base64는 한 번만 업로드 (중복 방지)
+    - 업로드 실패한 이미지는 base64 그대로 유지
+    """
+    import base64 as _b64
+    # base64 이미지 데이터 URI 패턴
+    pattern = re.compile(r'data:image/(\w+);base64,([A-Za-z0-9+/]+=*)')
+    matches = list(pattern.finditer(html_content))
+    if not matches:
+        return html_content, 0
+
+    # 중복 제거 (같은 base64 → 한 번만 업로드)
+    seen = {}
+    for m in matches:
+        key = m.group(0)
+        if key not in seen:
+            seen[key] = {"type": m.group(1), "b64": m.group(2), "url": None}
+
+    # 업로드
+    uploaded = 0
+    for i, (data_uri, info) in enumerate(seen.items()):
+        try:
+            img_bytes = _b64.b64decode(info["b64"])
+        except Exception:
+            continue
+        ext = "jpg" if info["type"] == "jpeg" else info["type"]
+        fname = f"img_{i}.{ext}"
+        url, _ = upload_blog_image(token, site_id, img_bytes, fname)
+        if url:
+            info["url"] = url
+            uploaded += 1
+
+    # 치환
+    result = html_content
+    for data_uri, info in seen.items():
+        if info["url"]:
+            result = result.replace(data_uri, info["url"])
+
+    return result, uploaded
 
 # ─────────────────────────────────────────────
 
@@ -3243,38 +3286,12 @@ elif menu == "📖 바이럴 백과사전":
             placeholder="이 글에서 다루는 내용을 2~3줄로 요약해주세요. 네이버 검색 결과에 노출됩니다.",
             height=90, key="vb_summary")
 
-        # ── 이미지 업로드 섹션 ──
-        with st.expander("🖼️ 이미지 업로드 (본문에 삽입할 이미지)"):
-            st.caption(
-                "이미지를 업로드하면 Netlify에 호스팅하고 URL을 발급합니다.\n"
-                "URL 복사 → 본문 에디터의 🖼 버튼 클릭 → URL 붙여넣기")
-            _vb_img_files = st.file_uploader(
-                "이미지 파일 선택 또는 드래그",
-                type=["jpg", "jpeg", "png", "gif", "webp"],
-                accept_multiple_files=True,
-                key="vb_img_uploader"
-            )
-            if _vb_img_files:
-                if st.button("☁️ Netlify에 업로드", key="vb_img_upload_btn"):
-                    _vtok_img = st.secrets.get("NETLIFY_TOKEN", "")
-                    _vsid_img = st.secrets.get("NETLIFY_SITE_ID", "")
-                    if not _vtok_img or not _vsid_img:
-                        st.error("Netlify 시크릿 설정이 없습니다.")
-                    else:
-                        for _img_f in _vb_img_files:
-                            with st.spinner(f"{_img_f.name} 업로드 중..."):
-                                _img_bytes = _img_f.read()
-                                _img_url, _img_msg = upload_blog_image(
-                                    _vtok_img, _vsid_img, _img_bytes, _img_f.name)
-                            if _img_url:
-                                st.success(f"✅ {_img_f.name} 업로드 완료!")
-                                st.image(_img_url, width=240)
-                                st.code(_img_url, language=None)
-                                st.caption("👆 URL 복사 → 에디터 🖼 버튼 → URL 붙여넣기")
-                            else:
-                                st.error(f"❌ {_img_f.name} 실패: {_img_msg}")
-
-        st.markdown("**📄 본문** — 글자 크기·색상·정렬·볼드·이미지 삽입 등 자유롭게 편집하세요.")
+        st.info(
+            "📌 **이미지 삽입 방법** — "
+            "탐색기(파일 탐색기)에서 이미지 파일을 아래 에디터 안으로 **바로 끌어다 놓으세요.** "
+            "글↔이미지를 원하는 순서로 자유롭게 섞을 수 있습니다. "
+            "발행 시 이미지가 자동으로 서버에 업로드되고 URL로 변환됩니다.")
+        st.markdown("**📄 본문** — 글자 크기·색상·정렬·볼드·이미지 자유롭게 편집")
         try:
             from streamlit_quill import st_quill
             _vb_body = st_quill(
@@ -3311,7 +3328,20 @@ elif menu == "📖 바이럴 백과사전":
                 for _e in _vb_err:
                     st.error(_e)
             else:
-                with st.spinner("게시글 발행 중... (구글시트 저장 → HTML 생성 → Netlify 배포)"):
+                _vtok2 = st.secrets.get("NETLIFY_TOKEN", "")
+                _vsid2 = st.secrets.get("NETLIFY_SITE_ID", "")
+                _vb_body_final = _vb_body or ""
+
+                # ── STEP 1: 에디터 내 base64 이미지 → Netlify 업로드 ──
+                _vb_img_count = _vb_body_final.count("data:image/")
+                if _vb_img_count > 0 and _vtok2 and _vsid2:
+                    with st.spinner(f"이미지 {_vb_img_count}장 서버 업로드 중..."):
+                        _vb_body_final, _uploaded_n = process_quill_images(
+                            _vb_body_final, _vtok2, _vsid2)
+                    if _uploaded_n > 0:
+                        st.success(f"🖼️ 이미지 {_uploaded_n}장 업로드 완료")
+
+                with st.spinner("게시글 저장 및 배포 중..."):
                     _vb_slug = make_slug(_vb_title.strip())
                     _vb_post_data = {
                         "날짜": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -3319,16 +3349,16 @@ elif menu == "📖 바이럴 백과사전":
                         "제목": _vb_title.strip(),
                         "해시태그": (_vb_tags or "").strip(),
                         "요약": _vb_summary.strip(),
-                        "본문HTML": _vb_body or "",
+                        "본문HTML": _vb_body_final,
                     }
 
-                    # 구글시트 저장
+                    # 구글시트 저장 (URL로 교체된 HTML 저장)
                     _vb_saved = save_viral_post(
                         _vb_slug,
                         _vb_title.strip(),
                         (_vb_tags or "").strip(),
                         _vb_summary.strip(),
-                        _vb_body or ""
+                        _vb_body_final
                     )
 
                     if _vb_saved:
@@ -3336,10 +3366,6 @@ elif menu == "📖 바이럴 백과사전":
                         _vb_post_html = generate_post_html(_vb_post_data).encode("utf-8")
                         _vb_all_posts = get_viral_posts()
                         _vb_idx_html = generate_blog_index_html(_vb_all_posts).encode("utf-8")
-
-                        # Netlify 증분 배포
-                        _vtok2 = st.secrets.get("NETLIFY_TOKEN", "")
-                        _vsid2 = st.secrets.get("NETLIFY_SITE_ID", "")
 
                         if _vtok2 and _vsid2:
                             _vb_ok, _vb_msg = deploy_blog_incremental(
