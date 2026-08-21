@@ -344,7 +344,7 @@ def deploy_to_netlify(html_content, site_id, token, extra_files=None):
 # ─────────────────────────────────────────────
 # 📖 바이럴 백과사전 헬퍼 함수
 # ─────────────────────────────────────────────
-VIRAL_SHEET_ID = "1OJkg679B09qvW5hAY_vT35KD0dl5435peGszwv55Fzs"
+VIRAL_SHEET_ID = "1CtD6VVtmiQNz90mKJFfuPq8-LMowLHg3NZPnoqwpISE"  # 버즈필터 시트 (서비스 계정 권한 있음)
 VIRAL_TAB_NAME = "바이럴백과사전"
 
 def get_viral_sheet():
@@ -648,6 +648,11 @@ def deploy_blog_incremental(token, site_id, new_files):
     기존 사이트 파일을 유지하면서 지정된 파일만 추가/갱신한다.
     """
     import hashlib as _hl
+    # 유효성 검사
+    if not token:
+        return False, "NETLIFY_TOKEN 시크릿이 비어 있습니다. Streamlit Cloud 시크릿 설정을 확인해주세요."
+    if not site_id:
+        return False, "NETLIFY_SITE_ID 시크릿이 비어 있습니다. Streamlit Cloud 시크릿 설정을 확인해주세요."
     headers_auth = {"Authorization": f"Bearer {token}"}
 
     # 1. 최신 배포 파일 목록 가져오기
@@ -696,7 +701,9 @@ def deploy_blog_incremental(token, site_id, new_files):
             json={"files": {f"/{k}": v for k, v in merged.items()}},
             timeout=30)
         if r3.status_code not in [200, 201]:
-            return False, f"배포 생성 실패: {r3.status_code} {r3.text[:300]}"
+            return False, (f"배포 생성 실패 (HTTP {r3.status_code})\n"
+                           f"site_id: {site_id}\n"
+                           f"응답: {r3.text[:500]}")
         deploy_data = r3.json()
         new_deploy_id = deploy_data["id"]
         required = deploy_data.get("required", [])
@@ -3257,6 +3264,16 @@ elif menu == "📖 바이럴 백과사전":
     # ── 탭1: 게시글 목록 ──
     with _vb_tab1:
         st.markdown("### 📋 발행된 게시글")
+
+        # 연결 상태 진단
+        with st.expander("🔍 연결 상태 확인"):
+            _diag_tok = st.secrets.get("NETLIFY_TOKEN", "")
+            _diag_sid = st.secrets.get("NETLIFY_SITE_ID", "")
+            st.write(f"- NETLIFY_TOKEN: {'✅ 있음' if _diag_tok else '❌ 없음'}")
+            st.write(f"- NETLIFY_SITE_ID: {'✅ 있음 (' + _diag_sid[:8] + '...)' if _diag_sid else '❌ 없음'}")
+            _diag_ws = get_viral_sheet()
+            st.write(f"- 구글시트 연결: {'✅ 성공 (바이럴백과사전 탭)' if _diag_ws else '❌ 실패'}")
+
         with st.spinner("게시글 불러오는 중..."):
             _vb_posts = get_viral_posts()
 
@@ -3388,16 +3405,21 @@ elif menu == "📖 바이럴 백과사전":
                     if _img_file:
                         _vbtok = st.secrets.get("NETLIFY_TOKEN", "")
                         _vbsid = st.secrets.get("NETLIFY_SITE_ID", "")
-                        with st.spinner(f"{_img_file.name} 업로드 중..."):
-                            _iurl, _imsg = upload_blog_image(
-                                _vbtok, _vbsid, _img_file.read(), _img_file.name)
-                        if _iurl:
-                            _vb_blocks[_bi]["url"] = _iurl
-                            st.image(_iurl, width=420)
-                            st.success("✅ 업로드 완료!")
-                            st.rerun()
+                        if not _vbtok:
+                            st.error("❌ NETLIFY_TOKEN 시크릿이 없습니다. Streamlit Cloud 시크릿 설정을 확인하세요.")
+                        elif not _vbsid:
+                            st.error("❌ NETLIFY_SITE_ID 시크릿이 없습니다. Streamlit Cloud 시크릿 설정을 확인하세요.")
                         else:
-                            st.error(f"업로드 실패: {_imsg}")
+                            with st.spinner(f"{_img_file.name} 업로드 중..."):
+                                _iurl, _imsg = upload_blog_image(
+                                    _vbtok, _vbsid, _img_file.read(), _img_file.name)
+                            if _iurl:
+                                _vb_blocks[_bi]["url"] = _iurl
+                                st.image(_iurl, width=420)
+                                st.success("✅ 업로드 완료!")
+                                st.rerun()
+                            else:
+                                st.error(f"업로드 실패: {_imsg}")
 
             st.markdown('<div style="height:6px"></div>', unsafe_allow_html=True)
 
