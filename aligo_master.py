@@ -3546,6 +3546,7 @@ elif menu == "📖 바이럴 백과사전":
                     )
 
                     if _vb_saved:
+                        get_viral_posts.clear()  # 캐시 클리어 후 최신 목록(새 글 포함) 가져오기
                         _vb_post_html = generate_post_html(_vb_post_data).encode("utf-8")
                         _vb_all_posts = get_viral_posts()
                         _vb_idx_html = generate_blog_index_html(_vb_all_posts).encode("utf-8")
@@ -3559,10 +3560,9 @@ elif menu == "📖 바이럴 백과사전":
                                 }
                             )
                             if _vb_ok:
-                                # 발행 후 블록 초기화 + 캐시 클리어
+                                # 발행 후 블록 초기화
                                 st.session_state["vb_blocks"] = [
                                     {"type": "text", "id": "blk_init", "url": None}]
-                                get_viral_posts.clear()
                                 st.success("✅ 발행 완료!")
                                 st.markdown(
                                     f"🔗 **게시글 주소:** https://aligomedia.co.kr/blog/{_vb_slug}/")
