@@ -3327,7 +3327,26 @@ elif menu == "📖 바이럴 백과사전":
         if not _vb_posts:
             st.info("아직 게시된 글이 없습니다. '새 글 작성' 탭에서 첫 번째 글을 작성해보세요!")
         else:
-            st.success(f"총 **{len(_vb_posts)}**개의 게시글이 있습니다.")
+            _col_stat, _col_rebuild = st.columns([3, 1])
+            with _col_stat:
+                st.success(f"총 **{len(_vb_posts)}**개의 게시글이 있습니다.")
+            with _col_rebuild:
+                if st.button("🔄 목록 재빌드", help="홈페이지 블로그 목록을 현재 글 기준으로 다시 생성합니다"):
+                    _rb_tok = st.secrets.get("NETLIFY_TOKEN", "")
+                    _rb_sid = st.secrets.get("NETLIFY_SITE_ID", "")
+                    if _rb_tok and _rb_sid:
+                        with st.spinner("목록 재생성 중..."):
+                            get_viral_posts.clear()
+                            _rb_posts = get_viral_posts()
+                            _rb_idx = generate_blog_index_html(_rb_posts).encode("utf-8")
+                            _rb_ok, _rb_msg = deploy_blog_incremental(
+                                _rb_tok, _rb_sid, {"blog/index.html": _rb_idx})
+                            if _rb_ok:
+                                st.success(f"✅ {len(_rb_posts)}개 글로 목록 재생성 완료!")
+                            else:
+                                st.error(f"배포 실패: {_rb_msg}")
+                    else:
+                        st.error("NETLIFY_TOKEN / NETLIFY_SITE_ID 시크릿을 확인해주세요.")
             for _vb_p in _vb_posts:
                 _vc = get_view_count(_vb_p["slug"])
                 with st.expander(f"📄 {_vb_p['제목']}  ·  {_vb_p['날짜'][:10]}  |  👁 {_vc:,}회"):
