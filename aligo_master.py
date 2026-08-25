@@ -377,8 +377,9 @@ def get_viral_sheet():
         return None
 
 
+@st.cache_data(ttl=120)
 def get_viral_posts():
-    """게시글 목록 반환 (최신 순)"""
+    """게시글 목록 반환 (최신 순, 2분 캐시)"""
     ws = get_viral_sheet()
     if not ws:
         return []
@@ -3351,6 +3352,7 @@ elif menu == "📖 바이럴 백과사전":
                                     deploy_blog_incremental(
                                         _vtok, _vsid,
                                         {"blog/index.html": _del_idx_html})
+                                get_viral_posts.clear()
                                 st.success("✅ 삭제 완료!")
                                 st.rerun()
                             else:
@@ -3557,9 +3559,10 @@ elif menu == "📖 바이럴 백과사전":
                                 }
                             )
                             if _vb_ok:
-                                # 발행 후 블록 초기화
+                                # 발행 후 블록 초기화 + 캐시 클리어
                                 st.session_state["vb_blocks"] = [
                                     {"type": "text", "id": "blk_init", "url": None}]
+                                get_viral_posts.clear()
                                 st.success("✅ 발행 완료!")
                                 st.markdown(
                                     f"🔗 **게시글 주소:** https://aligomedia.co.kr/blog/{_vb_slug}/")
