@@ -561,6 +561,70 @@ footer{{padding:40px 5%;background:#fff;border-top:1px solid #eee;}}
 </html>"""
 
 
+# ── 홈페이지 후기 관리 헬퍼 ──
+REVIEW_TAB_NAME = "홈페이지후기"
+
+def get_review_sheet():
+    """홈페이지 후기 구글시트 탭 연결. 없으면 자동 생성."""
+    try:
+        gc = get_gspread_client()
+        sh = gc.open_by_key(VIRAL_SHEET_ID)
+        try:
+            ws = sh.worksheet(REVIEW_TAB_NAME)
+        except Exception:
+            ws = sh.add_worksheet(title=REVIEW_TAB_NAME, rows=200, cols=6)
+            ws.append_row(["순서", "이름", "업종", "별점", "내용"])
+        return ws
+    except Exception as e:
+        st.error(f"후기 시트 연결 실패: {e}")
+        return None
+
+@st.cache_data(ttl=120)
+def get_homepage_reviews():
+    """홈페이지 후기 목록 반환"""
+    ws = get_review_sheet()
+    if not ws:
+        return []
+    rows = ws.get_all_values()
+    if len(rows) <= 1:
+        return []
+    reviews = []
+    for row in rows[1:]:
+        if len(row) >= 5 and row[4].strip():
+            reviews.append({
+                "순서": row[0] if len(row) > 0 else "",
+                "name": row[1] if len(row) > 1 else "",
+                "biz": row[2] if len(row) > 2 else "",
+                "stars": int(row[3]) if len(row) > 3 and row[3].isdigit() else 5,
+                "text": row[4] if len(row) > 4 else "",
+            })
+    return reviews
+
+def save_homepage_review(name, biz, stars, text):
+    """후기 구글시트에 저장"""
+    ws = get_review_sheet()
+    if not ws:
+        return False
+    rows = ws.get_all_values()
+    order = len(rows)
+    ws.append_row([str(order), name, biz, str(stars), text])
+    return True
+
+def delete_homepage_review(idx_in_sheet):
+    """후기 삭제 (시트 행 번호 기준)"""
+    ws = get_review_sheet()
+    if not ws:
+        return False
+    ws.delete_rows(idx_in_sheet)
+    return True
+
+def generate_reviews_json(reviews):
+    """홈페이지 후기 슬라이더용 reviews.json 생성"""
+    import json as _json
+    items = [{"name": r["name"], "biz": r["biz"], "stars": r["stars"], "text": r["text"]} for r in reviews]
+    return _json.dumps(items, ensure_ascii=False, indent=2).encode("utf-8")
+
+
 def generate_posts_json(posts):
     """홈페이지 블로그 슬라이더용 posts.json 생성"""
     import json as _json
@@ -2290,6 +2354,7 @@ with st.sidebar:
         "📊 함소아 보고서",
         "🖼️ 배경 흰색 변환",
         "📖 바이럴 백과사전",
+        "⭐ 홈페이지 후기 관리",
     ], label_visibility="collapsed")
     st.markdown("---")
     st.caption("버즈필터 업무 자동화 시스템")
@@ -3653,3 +3718,103 @@ elif menu == "📖 바이럴 백과사전":
                             st.warning("Netlify 시크릿 설정이 없어 홈페이지 배포는 건너뜁니다.\n구글시트에는 저장되었습니다.")
                     else:
                         st.error("구글시트 저장 실패. 시트 연결을 확인해주세요.")
+
+# ⭐ 홈페이지 후기 관리 메뉴
+elif menu == "⭐ 홈페이지 후기 관리":
+    st.markdown("## ⭐ 홈페이지 후기 관리")
+    st.caption("홈페이지에 노출할 고객 후기를 관리하고 배포합니다.")
+
+    _rv_tok = st.secrets.get("NETLIFY_TOKEN", "")
+    _rv_sid = st.secrets.get("NETLIFY_SITE_ID", "")
+
+    _rv_tab1, _rv_tab2 = st.tabs(["📋 후기 목록 & 배포", "➕ 후기 추가"])
+
+    # ── 탭1: 목록 & 배포 ──
+    with _rv_tab1:
+        if st.button("🔄 새로고침", key="rv_refresh"):
+            get_homepage_reviews.clear()
+            st.rerun()
+
+        _rv_list = get_homepage_reviews()
+
+        if not _rv_list:
+            st.info("등록된 후기가 없습니다. '후기 추가' 탭에서 추가해주세요.")
+        else:
+            _col_a, _col_b = st.columns([3, 1])
+            with _col_a:
+                st.success(f"총 **{len(_rv_list)}**개의 후기가 등록되어 있습니다.")
+            with _col_b:
+                if st.button("🚀 홈페이지에 배포", type="primary", key="rv_deploy"):
+                    if _rv_tok and _rv_sid:
+                        with st.spinner("배포 중..."):
+                            _rv_json = generate_reviews_json(_rv_list)
+                            _ok, _msg = deploy_blog_incremental(
+                                _rv_tok, _rv_sid, {"reviews.json": _rv_json})
+                            if _ok:
+                                st.success("✅ 홈페이지 후기 슬라이더 업데이트 완료!")
+                            else:
+                                st.error(f"배포 실패: {_msg}")
+                    else:
+                        st.error("NETLIFY_TOKEN / NETLIFY_SITE_ID 시크릿을 확인해주세요.")
+
+            st.divider()
+            # 후기 목록 표시
+            _rv_ws = get_review_sheet()
+            _rv_all_rows = _rv_ws.get_all_values() if _rv_ws else []
+
+            for _ri, _rv in enumerate(_rv_list):
+                _stars_display = "★" * _rv["stars"] + "☆" * (5 - _rv["stars"])
+                with st.expander(f"{_stars_display}  **{_rv['name']}** · {_rv['biz']}"):
+                    st.write(_rv["text"])
+                    # 시트에서 실제 행 번호 찾기 (헤더 제외, 1-indexed)
+                    _sheet_row = None
+                    for _sri, _srow in enumerate(_rv_all_rows):
+                        if _sri > 0 and len(_srow) >= 5 and _srow[4] == _rv["text"] and _srow[1] == _rv["name"]:
+                            _sheet_row = _sri + 1
+                            break
+                    if st.button("🗑️ 삭제", key=f"rv_del_{_ri}", type="secondary"):
+                        if _sheet_row and delete_homepage_review(_sheet_row):
+                            get_homepage_reviews.clear()
+                            st.success("삭제 완료!")
+                            st.rerun()
+                        else:
+                            st.error("삭제 실패")
+
+    # ── 탭2: 후기 추가 ──
+    with _rv_tab2:
+        st.markdown("#### 새 후기 입력")
+        _rv_name = st.text_input("이름 (예: 김OO 대표)", max_chars=30, key="rv_name")
+        _rv_biz  = st.text_input("업종/서비스 (예: 뷰티샵 · 플레이스 최적화)", max_chars=50, key="rv_biz")
+        _rv_stars = st.select_slider("별점", options=[1, 2, 3, 4, 5], value=5, key="rv_stars")
+        st.caption("★" * _rv_stars + "☆" * (5 - _rv_stars))
+        _rv_text = st.text_area("후기 내용", height=120, max_chars=300,
+                                placeholder='예: "플레이스 순위가 첫 화면까지 올라왔어요. 과정을 투명하게 공유해 주셔서 광고비가 아깝지 않았습니다."',
+                                key="rv_text")
+
+        st.caption("💡 앞뒤 따옴표는 자동으로 붙으니 내용만 입력하세요.")
+
+        if st.button("💾 저장 & 배포", type="primary", key="rv_save"):
+            if not _rv_name.strip():
+                st.error("이름을 입력해주세요.")
+            elif not _rv_text.strip():
+                st.error("후기 내용을 입력해주세요.")
+            else:
+                with st.spinner("저장 중..."):
+                    _saved = save_homepage_review(
+                        _rv_name.strip(), _rv_biz.strip(), _rv_stars, _rv_text.strip())
+                    if _saved:
+                        get_homepage_reviews.clear()
+                        _new_list = get_homepage_reviews()
+                        if _rv_tok and _rv_sid:
+                            _rv_json2 = generate_reviews_json(_new_list)
+                            _ok2, _msg2 = deploy_blog_incremental(
+                                _rv_tok, _rv_sid, {"reviews.json": _rv_json2})
+                            if _ok2:
+                                st.success(f"✅ 저장 완료! 홈페이지에 총 {len(_new_list)}개 후기가 노출됩니다.")
+                                st.balloons()
+                            else:
+                                st.warning(f"구글시트 저장은 됐지만 배포 실패: {_msg2}")
+                        else:
+                            st.success("✅ 구글시트에 저장됐습니다. (Netlify 시크릿 없음)")
+                    else:
+                        st.error("저장 실패. 시트 연결을 확인해주세요.")
