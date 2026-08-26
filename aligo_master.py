@@ -561,6 +561,21 @@ footer{{padding:40px 5%;background:#fff;border-top:1px solid #eee;}}
 </html>"""
 
 
+def generate_posts_json(posts):
+    """홈페이지 블로그 슬라이더용 posts.json 생성"""
+    import json as _json
+    items = []
+    for p in posts:
+        items.append({
+            "slug": p.get("slug", ""),
+            "title": p.get("제목", ""),
+            "tags": p.get("해시태그", ""),
+            "date": p.get("날짜", ""),
+            "thumbnail": extract_first_image(p.get("본문HTML", "") or ""),
+        })
+    return _json.dumps(items, ensure_ascii=False, indent=2).encode("utf-8")
+
+
 def generate_sitemap_xml(posts):
     """sitemap.xml 생성 (검색엔진 SEO용)"""
     urls = [
@@ -3373,9 +3388,11 @@ elif menu == "📖 바이럴 백과사전":
                             _rb_posts = get_viral_posts()
                             _rb_idx = generate_blog_index_html(_rb_posts).encode("utf-8")
                             _rb_sitemap = generate_sitemap_xml(_rb_posts).encode("utf-8")
+                            _rb_posts_json = generate_posts_json(_rb_posts)
                             _rb_ok, _rb_msg = deploy_blog_incremental(
                                 _rb_tok, _rb_sid, {
                                     "blog/index.html": _rb_idx,
+                                    "blog/posts.json": _rb_posts_json,
                                     "sitemap.xml": _rb_sitemap,
                                     "robots.txt": ROBOTS_TXT.encode("utf-8"),
                                 })
@@ -3608,6 +3625,7 @@ elif menu == "📖 바이럴 백과사전":
                         _vb_all_posts = get_viral_posts()
                         _vb_idx_html = generate_blog_index_html(_vb_all_posts).encode("utf-8")
                         _vb_sitemap = generate_sitemap_xml(_vb_all_posts).encode("utf-8")
+                        _vb_posts_json = generate_posts_json(_vb_all_posts)
 
                         if _vtok2 and _vsid2:
                             _vb_ok, _vb_msg = deploy_blog_incremental(
@@ -3615,6 +3633,7 @@ elif menu == "📖 바이럴 백과사전":
                                 {
                                     f"blog/{_vb_slug}/index.html": _vb_post_html,
                                     "blog/index.html": _vb_idx_html,
+                                    "blog/posts.json": _vb_posts_json,
                                     "sitemap.xml": _vb_sitemap,
                                     "robots.txt": ROBOTS_TXT.encode("utf-8"),
                                 }
