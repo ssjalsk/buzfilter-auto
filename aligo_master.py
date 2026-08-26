@@ -567,14 +567,23 @@ REVIEW_TAB_NAME = "홈페이지후기"
 def get_review_sheet():
     """홈페이지 후기 구글시트 탭 연결. 없으면 자동 생성."""
     try:
-        gc = get_gspread_client()
-        sh = gc.open_by_key(VIRAL_SHEET_ID)
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         try:
-            ws = sh.worksheet(REVIEW_TAB_NAME)
+            creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         except Exception:
-            ws = sh.add_worksheet(title=REVIEW_TAB_NAME, rows=200, cols=6)
+            BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+            creds = ServiceAccountCredentials.from_json_keyfile_name(
+                os.path.join(BASE_DIR, 'service_account.json'), scope)
+        client_gs = gspread.authorize(creds)
+        spreadsheet = client_gs.open_by_url(
+            f"https://docs.google.com/spreadsheets/d/{VIRAL_SHEET_ID}/")
+        try:
+            return spreadsheet.worksheet(REVIEW_TAB_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title=REVIEW_TAB_NAME, rows=200, cols=6)
             ws.append_row(["순서", "이름", "업종", "별점", "내용"])
-        return ws
+            return ws
     except Exception as e:
         st.error(f"후기 시트 연결 실패: {e}")
         return None
