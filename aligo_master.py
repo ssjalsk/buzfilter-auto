@@ -3874,6 +3874,42 @@ elif menu == "📖 바이럴 백과사전":
                     else:
                         st.error("구글시트 저장 실패. 시트 연결을 확인해주세요.")
 
+        # ── 전체 글 재배포 (복구용) ──
+        st.markdown("---")
+        with st.expander("🔧 긴급 복구 — 전체 글 재배포"):
+            st.caption("홈페이지에 글이 안 올라가거나 링크가 깨진 경우 클릭. 구글시트의 모든 글을 읽어 전체 재배포합니다.")
+            if st.button("🔄 전체 글 재배포 실행", key="vb_full_redeploy", type="primary"):
+                _rd_tok = st.secrets.get("NETLIFY_TOKEN", "")
+                _rd_sid = st.secrets.get("NETLIFY_SITE_ID", "")
+                if not _rd_tok or not _rd_sid:
+                    st.error("NETLIFY_TOKEN / NETLIFY_SITE_ID 시크릿 필요")
+                else:
+                    with st.spinner("구글시트에서 전체 글 로딩 및 재배포 중..."):
+                        try:
+                            get_viral_posts.clear()
+                            _rd_all = get_viral_posts()
+                            if not _rd_all:
+                                st.warning("구글시트에 글이 없습니다.")
+                            else:
+                                _rd_files = {}
+                                for _rp in _rd_all:
+                                    _rslug = _rp.get("slug", "")
+                                    if not _rslug:
+                                        continue
+                                    _rhtml = generate_post_html(_rp).encode("utf-8")
+                                    _rd_files[f"blog/{_rslug}/index.html"] = _rhtml
+                                _rd_files["blog/index.html"] = generate_blog_index_html(_rd_all).encode("utf-8")
+                                _rd_files["blog/posts.json"] = generate_posts_json(_rd_all)
+                                _rd_files["sitemap.xml"]     = generate_sitemap_xml(_rd_all).encode("utf-8")
+                                _rd_files["robots.txt"]      = ROBOTS_TXT.encode("utf-8")
+                                _rd_ok, _rd_msg = deploy_blog_incremental(_rd_tok, _rd_sid, _rd_files)
+                                if _rd_ok:
+                                    st.success(f"✅ 전체 재배포 완료! {len(_rd_all)}개 글 반영")
+                                else:
+                                    st.error(f"❌ 재배포 실패: {_rd_msg}")
+                        except Exception as _rde:
+                            st.error(f"오류: {_rde}")
+
 # ⭐ 홈페이지 후기 관리 메뉴
 elif menu == "⭐ 홈페이지 후기 관리":
     st.markdown("## ⭐ 홈페이지 후기 관리")
