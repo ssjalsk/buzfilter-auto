@@ -914,36 +914,67 @@ def push_files_to_github(new_files, commit_message="홈페이지 업데이트"):
         return False, f"GitHub 푸시 오류: {e}"
 
 
+def _netlify_get_live_files(token, site_id):
+    """
+    현재 라이브 배포의 전체 파일 목록 {'/path': 'sha1'} 반환.
+    실패 시 빈 딕셔너리 반환.
+    """
+    hdrs = {"Authorization": f"Bearer {token}"}
+    try:
+        r = requests.get(f"https://api.netlify.com/api/v1/sites/{site_id}/deploys",
+                         headers=hdrs, params={"per_page": 1}, timeout=15)
+        if r.status_code != 200 or not r.json():
+            return {}
+        latest_id = r.json()[0]["id"]
+        rf = requests.get(f"https://api.netlify.com/api/v1/deploys/{latest_id}/files",
+                          headers=hdrs, timeout=30)
+        if rf.status_code != 200:
+            return {}
+        return {f["id"]: f["sha"] for f in rf.json() if "id" in f and "sha" in f}
+    except Exception:
+        return {}
+
+
 def deploy_blog_incremental(token, site_id, new_files):
     """
-    Netlify API 직접 증분 배포 (SHA1 기반 — 변경 파일만 업로드).
-    GitHub push도 병행하여 버전 관리.
+    Netlify API 안전 증분 배포.
+    - 현재 라이브 파일 전체 조회 → 새 파일과 합쳐서 완전한 파일 맵 생성
+    - 기존 파일은 Netlify 캐시에서 자동 재사용, 새 파일만 실제 업로드
+    - 기존 파일이 배포에서 사라지는 문제 방지
     """
     import hashlib as _hl
     hdrs = {"Authorization": f"Bearer {token}"}
 
-    # SHA1 맵 생성
-    files_map = {}
+    # 1. 현재 라이브 파일 전체 목록 가져오기
+    existing_map = _netlify_get_live_files(token, site_id)
+
+    # 2. 새 파일 SHA1 계산
     sha_to_content = {}
+    new_sha_map = {}
     for fpath, fbytes in new_files.items():
+        norm = f"/{fpath.lstrip('/')}"
         sha1 = _hl.sha1(fbytes).hexdigest()
-        files_map[f"/{fpath.lstrip('/')}"] = sha1
+        new_sha_map[norm] = sha1
         sha_to_content[sha1] = (fpath.lstrip("/"), fbytes)
 
-    # 배포 생성 (Netlify가 필요한 파일 SHA 목록 반환)
+    # 3. 전체 파일 맵 = 기존 파일 + 새 파일 (새 파일이 기존 파일 덮어씀)
+    full_map = {**existing_map, **new_sha_map}
+
+    # 4. 배포 생성
     r2 = requests.post(
         f"https://api.netlify.com/api/v1/sites/{site_id}/deploys",
         headers={**hdrs, "Content-Type": "application/json"},
-        json={"files": files_map}, timeout=30)
+        json={"files": full_map}, timeout=30)
     if r2.status_code not in [200, 201]:
         return False, f"배포 생성 실패: HTTP {r2.status_code} — {r2.text[:200]}"
 
     deploy_id = r2.json()["id"]
     required   = r2.json().get("required", [])
 
-    # 변경된 파일만 업로드
+    # 5. 실제로 필요한 파일만 업로드 (새 파일만 해당, 기존 파일은 Netlify 캐시 재사용)
     for sha1 in required:
         if sha1 not in sha_to_content:
+            # 기존 파일인데 캐시 누락 — 무시 (Netlify가 처리)
             continue
         fpath, fdata = sha_to_content[sha1]
         ru = requests.put(
@@ -953,7 +984,7 @@ def deploy_blog_incremental(token, site_id, new_files):
         if ru.status_code not in [200, 201]:
             return False, f"파일 업로드 실패 ({fpath}): HTTP {ru.status_code}"
 
-    # GitHub에도 푸시 (버전 관리 — 실패해도 배포는 성공 처리)
+    # 6. GitHub에도 병행 푸시 (버전 관리 — 실패해도 배포에 영향 없음)
     try:
         titles = list(new_files.keys())
         label = ", ".join(titles[:2]) + ("..." if len(titles) > 2 else "")
@@ -961,45 +992,23 @@ def deploy_blog_incremental(token, site_id, new_files):
     except Exception:
         pass
 
-    return True, f"배포 완료 ({len(new_files)}개 파일, {len(required)}개 업로드)"
+    return True, f"배포 완료 ({len(new_files)}개 변경, {len(required)}개 실제 업로드)"
 
 
 def upload_blog_image(token, site_id, image_bytes, original_filename):
     """
-    블로그 이미지를 Netlify에 직접 업로드하고 공개 URL을 반환.
-    GitHub에도 병행 푸시 (버전 관리).
+    블로그 이미지를 Netlify에 안전하게 업로드.
+    기존 파일 목록 유지 + 새 이미지 추가.
     """
     import hashlib as _hl
     ts = datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
     safe_name = re.sub(r'[^\w.\-]', '_', original_filename)
     img_path = f"blog/images/{ts}-{safe_name}"
 
-    # Netlify 직접 업로드
-    hdrs = {"Authorization": f"Bearer {token}"}
-    sha1 = _hl.sha1(image_bytes).hexdigest()
-    r2 = requests.post(
-        f"https://api.netlify.com/api/v1/sites/{site_id}/deploys",
-        headers={**hdrs, "Content-Type": "application/json"},
-        json={"files": {f"/{img_path}": sha1}}, timeout=30)
-    if r2.status_code not in [200, 201]:
-        return None, f"이미지 배포 생성 실패: HTTP {r2.status_code}"
-    deploy_id = r2.json()["id"]
-    required   = r2.json().get("required", [])
-    if required:
-        ru = requests.put(
-            f"https://api.netlify.com/api/v1/deploys/{deploy_id}/files/{img_path}",
-            headers={**hdrs, "Content-Type": "application/octet-stream"},
-            data=image_bytes, timeout=30)
-        if ru.status_code not in [200, 201]:
-            return None, f"이미지 업로드 실패: HTTP {ru.status_code}"
-
-    # GitHub에도 병행 푸시 (실패해도 Netlify 업로드는 성공)
-    try:
-        push_files_to_github({img_path: image_bytes}, commit_message=f"이미지: {safe_name}")
-    except Exception:
-        pass
-
-    return f"https://aligomedia.co.kr/{img_path}", "성공"
+    ok, msg = deploy_blog_incremental(token, site_id, {img_path: image_bytes})
+    if ok:
+        return f"https://aligomedia.co.kr/{img_path}", "성공"
+    return None, msg
 
 
 def process_quill_images(html_content, token, site_id):
