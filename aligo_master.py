@@ -433,13 +433,15 @@ def make_slug(title):
 
 @st.cache_data(ttl=300)
 def get_view_count(slug):
-    """hits.seeyoufarm.com에서 조회수 가져오기 (5분 캐시)"""
+    """hits.seeyoufarm.com에서 조회수 읽기 (5분 캐시)
+    incr 대신 count/badge 엔드포인트 사용 → 관리자 조회 시 카운트 오염 방지"""
     import urllib.parse as _ulp
     try:
         encoded = _ulp.quote(
             f"https://aligomedia.co.kr/blog/{slug}/", safe="")
+        # incr(증가) → badge(읽기전용) 으로 변경
         r = requests.get(
-            f"https://hits.seeyoufarm.com/api/count/incr/badge.svg?url={encoded}",
+            f"https://hits.seeyoufarm.com/api/count/badge.svg?url={encoded}",
             timeout=8)
         if r.status_code == 200:
             nums = re.findall(r">(\d+)<", r.text)
