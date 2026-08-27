@@ -463,7 +463,8 @@ def generate_post_html(post):
     summary_esc = post["요약"].replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')[:160]
     slug = post["slug"]
     date_str = post["날짜"]
-    hits_url = f"https%3A%2F%2Faligomedia.co.kr%2Fblog%2F{slug}%2F"
+    import urllib.parse as _ulp
+    hits_url = _ulp.quote(f"https://aligomedia.co.kr/blog/{slug}/", safe="")
     return f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
