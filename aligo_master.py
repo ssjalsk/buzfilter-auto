@@ -916,17 +916,21 @@ def push_files_to_github(new_files, commit_message="홈페이지 업데이트"):
 
 def _netlify_get_live_files(token, site_id):
     """
-    현재 라이브 배포의 전체 파일 목록 {'/path': 'sha1'} 반환.
-    실패 시 빈 딕셔너리 반환.
+    현재 실제 퍼블리시된 배포의 전체 파일 목록 {'/path': 'sha1'} 반환.
+    - /deploys 최신 배포 기준 X → error 배포 포함돼 사이트 날아가는 버그
+    - /sites/{id} 에서 published_deploy.id 로 현재 라이브 배포만 정확히 조회
     """
     hdrs = {"Authorization": f"Bearer {token}"}
     try:
-        r = requests.get(f"https://api.netlify.com/api/v1/sites/{site_id}/deploys",
-                         headers=hdrs, params={"per_page": 1}, timeout=15)
-        if r.status_code != 200 or not r.json():
+        # 현재 퍼블리시된 배포 ID 조회 (error/processing 배포 제외)
+        rs = requests.get(f"https://api.netlify.com/api/v1/sites/{site_id}",
+                          headers=hdrs, timeout=15)
+        if rs.status_code != 200:
             return {}
-        latest_id = r.json()[0]["id"]
-        rf = requests.get(f"https://api.netlify.com/api/v1/deploys/{latest_id}/files",
+        published_id = rs.json().get("published_deploy", {}).get("id", "")
+        if not published_id:
+            return {}
+        rf = requests.get(f"https://api.netlify.com/api/v1/deploys/{published_id}/files",
                           headers=hdrs, timeout=30)
         if rf.status_code != 200:
             return {}
