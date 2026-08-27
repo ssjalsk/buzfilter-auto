@@ -809,105 +809,125 @@ footer{{padding:50px 5%;background:#fff;border-top:1px solid #eee;}}
 </html>"""
 
 
+def push_files_to_github(new_files, commit_message="홈페이지 업데이트"):
+    """
+    GitHub Git Data API로 파일들을 단일 커밋으로 푸시.
+    new_files: {path: bytes}
+    단일 커밋 → Netlify 자동 배포 1회 트리거 → Netlify 크레딧 0 소비.
+    GITHUB_TOKEN 시크릿 필요 (repo 권한 PAT).
+    """
+    import base64 as _b64
+
+    _gh_token = st.secrets.get("GITHUB_TOKEN", "")
+    if not _gh_token:
+        return False, (
+            "GITHUB_TOKEN 시크릿이 없습니다.\n"
+            "github.com → Settings → Developer settings → Personal access tokens (classic) →\n"
+            "Generate new token → repo 권한 선택 → 발급 후 Streamlit Cloud 시크릿에 GITHUB_TOKEN으로 추가해주세요."
+        )
+
+    OWNER  = "ssjalsk"
+    REPO   = "aligomedia-web"
+    BRANCH = "main"
+    API    = "https://api.github.com"
+    hdrs   = {
+        "Authorization": f"Bearer {_gh_token}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        # 1. 현재 HEAD 커밋 SHA
+        r = requests.get(f"{API}/repos/{OWNER}/{REPO}/git/ref/heads/{BRANCH}",
+                         headers=hdrs, timeout=15)
+        if r.status_code != 200:
+            return False, f"GitHub 브랜치 조회 실패 (HTTP {r.status_code}): {r.text[:200]}"
+        head_sha = r.json()["object"]["sha"]
+
+        # 2. HEAD 커밋의 base 트리 SHA
+        r2 = requests.get(f"{API}/repos/{OWNER}/{REPO}/git/commits/{head_sha}",
+                          headers=hdrs, timeout=15)
+        if r2.status_code != 200:
+            return False, f"GitHub 커밋 조회 실패 (HTTP {r2.status_code})"
+        base_tree_sha = r2.json()["tree"]["sha"]
+
+        # 3. 각 파일 blob 생성
+        tree_items = []
+        for fpath, fbytes in new_files.items():
+            fpath_clean = fpath.lstrip("/")
+            try:
+                text_content = fbytes.decode("utf-8")
+                payload = {"content": text_content, "encoding": "utf-8"}
+            except (UnicodeDecodeError, ValueError):
+                payload = {"content": _b64.b64encode(fbytes).decode("ascii"),
+                           "encoding": "base64"}
+            rb = requests.post(f"{API}/repos/{OWNER}/{REPO}/git/blobs",
+                               headers=hdrs, json=payload, timeout=30)
+            if rb.status_code not in [200, 201]:
+                return False, f"Blob 생성 실패 ({fpath_clean}): HTTP {rb.status_code}"
+            tree_items.append({
+                "path": fpath_clean,
+                "mode": "100644",
+                "type": "blob",
+                "sha": rb.json()["sha"]
+            })
+
+        # 4. 새 트리 생성
+        rt = requests.post(f"{API}/repos/{OWNER}/{REPO}/git/trees",
+                           headers=hdrs,
+                           json={"base_tree": base_tree_sha, "tree": tree_items},
+                           timeout=30)
+        if rt.status_code not in [200, 201]:
+            return False, f"트리 생성 실패: HTTP {rt.status_code}"
+        new_tree_sha = rt.json()["sha"]
+
+        # 5. 새 커밋 생성
+        rc = requests.post(f"{API}/repos/{OWNER}/{REPO}/git/commits",
+                           headers=hdrs,
+                           json={"message": commit_message,
+                                 "tree": new_tree_sha,
+                                 "parents": [head_sha]},
+                           timeout=30)
+        if rc.status_code not in [200, 201]:
+            return False, f"커밋 생성 실패: HTTP {rc.status_code}"
+        new_commit_sha = rc.json()["sha"]
+
+        # 6. 브랜치 레퍼런스 업데이트
+        rr = requests.patch(f"{API}/repos/{OWNER}/{REPO}/git/refs/heads/{BRANCH}",
+                            headers=hdrs,
+                            json={"sha": new_commit_sha},
+                            timeout=15)
+        if rr.status_code not in [200, 201]:
+            return False, f"브랜치 업데이트 실패: HTTP {rr.status_code}"
+
+        return True, f"GitHub 푸시 성공 ({len(new_files)}개 파일) — Netlify 자동 배포 시작"
+
+    except Exception as e:
+        return False, f"GitHub 푸시 오류: {e}"
+
+
 def deploy_blog_incremental(token, site_id, new_files):
     """
-    Netlify 해시 기반 증분 배포.
-    new_files: {path: bytes} (예: {"blog/index.html": b"...", "blog/slug/index.html": b"..."})
-    기존 사이트 파일을 유지하면서 지정된 파일만 추가/갱신한다.
+    [v2 — GitHub 방식] 블로그/후기 배포.
+    Netlify API 직접 호출 대신 GitHub push → Netlify 자동 배포 사용.
+    token/site_id 파라미터는 기존 호환성 유지를 위해 받되 미사용.
+    크레딧 소비: 0 (정적 사이트 Git 배포).
     """
-    import hashlib as _hl
-    # 유효성 검사
-    if not token:
-        return False, "NETLIFY_TOKEN 시크릿이 비어 있습니다. Streamlit Cloud 시크릿 설정을 확인해주세요."
-    if not site_id:
-        return False, "NETLIFY_SITE_ID 시크릿이 비어 있습니다. Streamlit Cloud 시크릿 설정을 확인해주세요."
-    headers_auth = {"Authorization": f"Bearer {token}"}
-
-    # 1. 최신 배포 파일 목록 가져오기
-    try:
-        r = requests.get(
-            f"https://api.netlify.com/api/v1/sites/{site_id}/deploys?per_page=10",
-            headers=headers_auth, timeout=20)
-        deploys = r.json() if r.status_code == 200 else []
-        latest_id = None
-        for d in (deploys if isinstance(deploys, list) else []):
-            if d.get("state") == "ready":
-                latest_id = d["id"]
-                break
-
-        existing_files = {}
-        if latest_id:
-            r2 = requests.get(
-                f"https://api.netlify.com/api/v1/deploys/{latest_id}/files",
-                headers=headers_auth, timeout=20)
-            if r2.status_code == 200:
-                for f in r2.json():
-                    path = f.get("id", "").lstrip("/")
-                    sha = f.get("sha", "")
-                    if path and sha:
-                        existing_files[path] = sha
-    except Exception as e:
-        return False, f"기존 배포 파일 조회 실패: {e}"
-
-    # 2. 새 파일 SHA1 계산
-    new_sha = {}
-    content_by_sha = {}
-    for path, content in new_files.items():
-        path_clean = path.lstrip("/")
-        sha1 = _hl.sha1(content).hexdigest()
-        new_sha[path_clean] = sha1
-        content_by_sha[sha1] = (path_clean, content)
-
-    # 3. 병합 (기존 유지 + 새 파일 덮어쓰기)
-    merged = {**existing_files, **new_sha}
-
-    # 4. 새 배포 생성
-    try:
-        r3 = requests.post(
-            f"https://api.netlify.com/api/v1/sites/{site_id}/deploys",
-            headers={**headers_auth, "Content-Type": "application/json"},
-            json={"files": {f"/{k}": v for k, v in merged.items()}},
-            timeout=30)
-        if r3.status_code not in [200, 201]:
-            return False, (f"배포 생성 실패 (HTTP {r3.status_code})\n"
-                           f"site_id: {site_id}\n"
-                           f"응답: {r3.text[:500]}")
-        deploy_data = r3.json()
-        new_deploy_id = deploy_data["id"]
-        required = deploy_data.get("required", [])
-    except Exception as e:
-        return False, f"배포 생성 오류: {e}"
-
-    # 5. 필요한 파일만 업로드
-    upload_errors = []
-    for sha1 in required:
-        if sha1 not in content_by_sha:
-            continue
-        file_path, file_content = content_by_sha[sha1]
-        try:
-            ru = requests.put(
-                f"https://api.netlify.com/api/v1/deploys/{new_deploy_id}/files/{file_path}",
-                headers={**headers_auth, "Content-Type": "application/octet-stream"},
-                data=file_content, timeout=30)
-            if ru.status_code not in [200, 201]:
-                upload_errors.append(f"{file_path}: {ru.status_code}")
-        except Exception as e:
-            upload_errors.append(f"{file_path}: {e}")
-
-    if upload_errors:
-        return False, "일부 파일 업로드 실패:\n" + "\n".join(upload_errors)
-    return True, f"배포 성공 (deploy_id: {new_deploy_id})"
+    titles = list(new_files.keys())
+    label = ", ".join(titles[:2]) + ("..." if len(titles) > 2 else "")
+    return push_files_to_github(new_files, commit_message=f"업데이트: {label}")
 
 
 def upload_blog_image(token, site_id, image_bytes, original_filename):
     """
-    블로그 이미지를 Netlify에 업로드하고 공개 URL을 반환.
-    blog/images/{timestamp}-{filename} 경로에 저장.
+    블로그 이미지를 GitHub에 업로드하고 공개 URL을 반환.
+    GitHub → Netlify 자동 배포로 크레딧 0 소비.
     """
     ts = datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
     safe_name = re.sub(r'[^\w.\-]', '_', original_filename)
     img_path = f"blog/images/{ts}-{safe_name}"
-    ok, msg = deploy_blog_incremental(token, site_id, {img_path: image_bytes})
+    ok, msg = push_files_to_github({img_path: image_bytes},
+                                    commit_message=f"이미지: {safe_name}")
     if ok:
         return f"https://aligomedia.co.kr/{img_path}", "성공"
     return None, msg
@@ -3721,10 +3741,10 @@ elif menu == "📖 바이럴 백과사전":
                                     f"🔗 **게시글 주소:** https://aligomedia.co.kr/blog/{_vb_slug}/")
                                 st.balloons()
                             else:
-                                st.error(f"Netlify 배포 실패: {_vb_msg}")
+                                st.error(f"배포 실패: {_vb_msg}")
                                 st.info("구글시트에는 저장되었습니다.")
                         else:
-                            st.warning("Netlify 시크릿 설정이 없어 홈페이지 배포는 건너뜁니다.\n구글시트에는 저장되었습니다.")
+                            st.warning("NETLIFY_TOKEN 시크릿이 없어 홈페이지 배포는 건너뜁니다.\n구글시트에는 저장되었습니다.")
                     else:
                         st.error("구글시트 저장 실패. 시트 연결을 확인해주세요.")
 
