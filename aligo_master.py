@@ -3826,6 +3826,21 @@ elif menu == "📖 바이럴 백과사전":
                         _vb_posts_json = generate_posts_json(_vb_all_posts)
 
                         if _vtok2 and _vsid2:
+                            # 이미지 블록의 바이트를 발행 배포에 함께 포함
+                            # (별도 이미지 업로드 배포가 아직 published 안 됐을 수 있어 누락 방지)
+                            import base64 as _b64pub
+                            _vb_img_deploy = {}
+                            for _blk in _vb_blocks:
+                                if (_blk["type"] == "image"
+                                        and _blk.get("url") and _blk.get("b64")):
+                                    try:
+                                        _ibytes = _b64pub.b64decode(_blk["b64"])
+                                        _ipath  = _blk["url"].replace(
+                                            "https://aligomedia.co.kr/", "")
+                                        _vb_img_deploy[_ipath] = _ibytes
+                                    except Exception:
+                                        pass
+
                             _vb_ok, _vb_msg = deploy_blog_incremental(
                                 _vtok2, _vsid2,
                                 {
@@ -3834,6 +3849,7 @@ elif menu == "📖 바이럴 백과사전":
                                     "blog/posts.json": _vb_posts_json,
                                     "sitemap.xml": _vb_sitemap,
                                     "robots.txt": ROBOTS_TXT.encode("utf-8"),
+                                    **_vb_img_deploy,  # 이미지 파일 확실히 포함
                                 }
                             )
                             if _vb_ok:
