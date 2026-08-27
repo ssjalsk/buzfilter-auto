@@ -900,7 +900,15 @@ def push_files_to_github(new_files, commit_message="홈페이지 업데이트"):
         if rr.status_code not in [200, 201]:
             return False, f"브랜치 업데이트 실패: HTTP {rr.status_code}"
 
-        return True, f"GitHub 푸시 성공 ({len(new_files)}개 파일) — Netlify 자동 배포 시작"
+        # 7. Netlify Deploy Hook 호출 (GitHub push → Netlify 자동 배포)
+        _hook = st.secrets.get("NETLIFY_DEPLOY_HOOK", "")
+        if _hook:
+            try:
+                requests.post(_hook, timeout=10)
+            except Exception:
+                pass  # hook 호출 실패해도 GitHub 푸시는 성공으로 처리
+
+        return True, f"GitHub 푸시 성공 ({len(new_files)}개 파일) — Netlify 배포 시작"
 
     except Exception as e:
         return False, f"GitHub 푸시 오류: {e}"
