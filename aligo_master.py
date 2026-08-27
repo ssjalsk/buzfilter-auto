@@ -3601,12 +3601,15 @@ elif menu == "📖 바이럴 백과사전":
                         html=True,
                         key=f"q_{_bid}"
                     )
-                    # rerun 후에도 내용 보존
+                    # rerun 후에도 내용 보존 (삭제 시에도 빈 값으로 갱신 — BUG-02)
                     _skey = f"__vbtxt_{_bid}"
                     if _raw is not None:
                         _clean = (_raw or "").strip()
                         if _clean and _clean not in ("<p><br></p>", "<p></p>"):
                             st.session_state[_skey] = _raw
+                        else:
+                            # 내용이 지워진 경우 session_state도 비워줌
+                            st.session_state[_skey] = ""
                 else:
                     _raw = st.text_area(
                         "텍스트 입력", height=150,
@@ -3636,12 +3639,12 @@ elif menu == "📖 바이럴 백과사전":
                         key=f"imgup_{_bid}"
                     )
                     if _img_file:
-                        _vbtok = st.secrets.get("NETLIFY_TOKEN", "")
+                        # BUG-03: NETLIFY_TOKEN이 아닌 GITHUB_TOKEN으로 실제 업로드하므로 GITHUB_TOKEN 체크
+                        _vbtok = st.secrets.get("NETLIFY_TOKEN", "")  # 시그니처 호환용 (미사용)
                         _vbsid = st.secrets.get("NETLIFY_SITE_ID", "")
-                        if not _vbtok:
-                            st.error("❌ NETLIFY_TOKEN 시크릿이 없습니다. Streamlit Cloud 시크릿 설정을 확인하세요.")
-                        elif not _vbsid:
-                            st.error("❌ NETLIFY_SITE_ID 시크릿이 없습니다. Streamlit Cloud 시크릿 설정을 확인하세요.")
+                        _vbghk = st.secrets.get("GITHUB_TOKEN", "")
+                        if not _vbghk:
+                            st.error("❌ GITHUB_TOKEN 시크릿이 없습니다. Streamlit Cloud 시크릿 설정을 확인하세요.")
                         else:
                             _img_bytes = _img_file.read()
                             with st.spinner(f"{_img_file.name} 업로드 중..."):
@@ -3651,8 +3654,7 @@ elif menu == "📖 바이럴 백과사전":
                                 import base64 as _b64m
                                 _vb_blocks[_bi]["url"] = _iurl
                                 _vb_blocks[_bi]["b64"] = _b64m.b64encode(_img_bytes).decode()
-                                st.image(_img_bytes, width=420)  # 로컬 bytes로 즉시 표시
-                                st.success("✅ 업로드 완료! (홈페이지 반영까지 1~2분 소요)")
+                                # BUG-04: st.rerun() 이후 표시되지 않으므로 rerun 전 표시 제거 (rerun 후 b64 미리보기로 표시됨)
                                 st.rerun()
                             else:
                                 st.error(f"업로드 실패: {_imsg}")
@@ -3669,6 +3671,11 @@ elif menu == "📖 바이럴 백과사전":
             st.rerun()
 
         if _vb_to_delete is not None:
+            # BUG-06: 삭제된 블록의 session_state 텍스트 키도 함께 정리
+            _del_bid = _vb_blocks[_vb_to_delete]["id"]
+            _del_skey = f"__vbtxt_{_del_bid}"
+            if _del_skey in st.session_state:
+                del st.session_state[_del_skey]
             _vb_blocks.pop(_vb_to_delete)
             st.rerun()
 
@@ -3705,6 +3712,11 @@ elif menu == "📖 바이럴 백과사전":
                 _vb_err.append("요약을 입력해주세요.")
             if not _vb_body_final.strip():
                 _vb_err.append("본문 블록에 내용을 입력해주세요.")
+            # BUG-05: 이미지 없는 이미지 블록 경고
+            _empty_img_blocks = [i+1 for i, b in enumerate(_vb_blocks)
+                                  if b["type"] == "image" and not b.get("url")]
+            if _empty_img_blocks:
+                _vb_err.append(f"이미지 블록 {_empty_img_blocks}번에 이미지가 없습니다. 이미지를 업로드하거나 블록을 삭제해주세요.")
             if _vb_err:
                 for _e in _vb_err:
                     st.error(_e)
@@ -3751,9 +3763,15 @@ elif menu == "📖 바이럴 백과사전":
                                 }
                             )
                             if _vb_ok:
-                                # 발행 후 블록 초기화
+                                # BUG-01: 발행 후 블록 초기화 시 이전 텍스트 session_state도 함께 삭제
+                                for _old_blk in st.session_state.get("vb_blocks", []):
+                                    _old_key = f"__vbtxt_{_old_blk['id']}"
+                                    if _old_key in st.session_state:
+                                        del st.session_state[_old_key]
                                 st.session_state["vb_blocks"] = [
                                     {"type": "text", "id": "blk_init", "url": None}]
+                                # blk_init 초기화
+                                st.session_state["__vbtxt_blk_init"] = ""
                                 st.success("✅ 발행 완료!")
                                 st.markdown(
                                     f"🔗 **게시글 주소:** https://aligomedia.co.kr/blog/{_vb_slug}/")
