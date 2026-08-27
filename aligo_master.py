@@ -3617,10 +3617,17 @@ elif menu == "📖 바이럴 백과사전":
 
             elif _blk["type"] == "image":
                 _stored_url = _blk.get("url")
+                _stored_b64 = _blk.get("b64")  # 로컬 미리보기용 base64
                 if _stored_url:
-                    st.image(_stored_url, width=420)
+                    # 로컬 bytes 우선 사용 (Netlify 배포 지연 무관)
+                    if _stored_b64:
+                        import base64 as _b64m
+                        st.image(_b64m.b64decode(_stored_b64), width=420)
+                    else:
+                        st.image(_stored_url, width=420)
                     if st.button("🔄 이미지 변경", key=f"vbchg_{_bid}"):
                         _vb_blocks[_bi]["url"] = None
+                        _vb_blocks[_bi]["b64"] = None
                         st.rerun()
                 else:
                     _img_file = st.file_uploader(
@@ -3636,13 +3643,16 @@ elif menu == "📖 바이럴 백과사전":
                         elif not _vbsid:
                             st.error("❌ NETLIFY_SITE_ID 시크릿이 없습니다. Streamlit Cloud 시크릿 설정을 확인하세요.")
                         else:
+                            _img_bytes = _img_file.read()
                             with st.spinner(f"{_img_file.name} 업로드 중..."):
                                 _iurl, _imsg = upload_blog_image(
-                                    _vbtok, _vbsid, _img_file.read(), _img_file.name)
+                                    _vbtok, _vbsid, _img_bytes, _img_file.name)
                             if _iurl:
+                                import base64 as _b64m
                                 _vb_blocks[_bi]["url"] = _iurl
-                                st.image(_iurl, width=420)
-                                st.success("✅ 업로드 완료!")
+                                _vb_blocks[_bi]["b64"] = _b64m.b64encode(_img_bytes).decode()
+                                st.image(_img_bytes, width=420)  # 로컬 bytes로 즉시 표시
+                                st.success("✅ 업로드 완료! (홈페이지 반영까지 1~2분 소요)")
                                 st.rerun()
                             else:
                                 st.error(f"업로드 실패: {_imsg}")
