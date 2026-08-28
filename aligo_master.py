@@ -433,20 +433,16 @@ def make_slug(title):
 
 @st.cache_data(ttl=300)
 def get_view_count(slug):
-    """hits.seeyoufarm.com에서 조회수 읽기 (5분 캐시)
-    incr 대신 count/badge 엔드포인트 사용 → 관리자 조회 시 카운트 오염 방지"""
-    import urllib.parse as _ulp
+    """CountAPI에서 조회수 읽기 (5분 캐시, 증가 없음)
+    namespace=aligomedia, key=slug"""
     try:
-        encoded = _ulp.quote(
-            f"https://aligomedia.co.kr/blog/{slug}/", safe="")
-        # incr(증가) → badge(읽기전용) 으로 변경
+        import urllib.parse as _ulp
+        safe_slug = _ulp.quote(slug, safe="")
         r = requests.get(
-            f"https://hits.seeyoufarm.com/api/count/badge.svg?url={encoded}",
+            f"https://api.countapi.xyz/get/aligomedia/{safe_slug}",
             timeout=8)
         if r.status_code == 200:
-            nums = re.findall(r">(\d+)<", r.text)
-            valid = [int(n) for n in nums if n.isdigit() and len(n) <= 7]
-            return max(valid) if valid else 0
+            return int(r.json().get("value", 0) or 0)
         return 0
     except Exception:
         return 0
@@ -463,8 +459,6 @@ def generate_post_html(post):
     summary_esc = post["요약"].replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')[:160]
     slug = post["slug"]
     date_str = post["날짜"]
-    import urllib.parse as _ulp
-    hits_url = _ulp.quote(f"https://aligomedia.co.kr/blog/{slug}/", safe="")
     return f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -545,8 +539,23 @@ footer{{padding:40px 5%;background:#fff;border-top:1px solid #eee;}}
 <div class="post-body">{body}</div>
 </main>
 <div class="post-views">
-<img src="https://hits.seeyoufarm.com/api/count/incr/badge.svg?url={hits_url}&count_bg=%232e4a8f&title_bg=%23555555&title=%EC%A1%B0%ED%9A%8C%EC%88%98&edge_flat=false" alt="조회수" height="22" loading="lazy">
+👁 조회수 <span id="vc-display">...</span>
 </div>
+<script>
+(function(){{
+  var slug = "{slug}";
+  fetch("https://api.countapi.xyz/hit/aligomedia/" + encodeURIComponent(slug))
+    .then(function(r){{return r.json();}})
+    .then(function(d){{
+      var el = document.getElementById("vc-display");
+      if(el) el.textContent = (d && d.value ? Number(d.value).toLocaleString() : "0") + "회";
+    }})
+    .catch(function(){{
+      var el = document.getElementById("vc-display");
+      if(el) el.textContent = "";
+    }});
+}})();
+</script>
 <div class="post-footer">
 <a href="/blog/" class="back-btn">← 목록으로 돌아가기</a>
 </div>
