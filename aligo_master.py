@@ -4240,6 +4240,90 @@ elif menu == "💰 급여 계산기":
 
         st.markdown("---")
 
+        # ── 추가 재무 정보 (미수금 + 충전잔액) ────────────────
+        st.markdown("### 📡 추가 재무 현황")
+        _ext_col1, _ext_col2 = st.columns(2)
+        with _ext_col1:
+            if st.button("🔄 미수금 / 충전잔액 불러오기", key="sal_ext_load"):
+                # 언론 매출 통계 J34 — 미수금
+                try:
+                    _misu_ws = get_salary_sheet("언론 매출 통계")
+                    _misu_val = _salary_parse_amount(_misu_ws.cell(34, 10).value) if _misu_ws else 0
+                except Exception:
+                    _misu_val = 0
+                # 한미마 송출 I3
+                try:
+                    _hm_ws = get_salary_sheet("한미마 송출")
+                    _hm_val = _salary_parse_amount(_hm_ws.cell(3, 9).value) if _hm_ws else 0
+                except Exception:
+                    _hm_val = 0
+                # 비지니스코리아 I3 (외부 시트)
+                try:
+                    _scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+                    try:
+                        _c2 = ServiceAccountCredentials.from_json_keyfile_dict(
+                            json.loads(st.secrets["GOOGLE_CREDENTIALS"]), _scope)
+                    except Exception:
+                        _c2 = ServiceAccountCredentials.from_json_keyfile_name(
+                            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'service_account.json'), _scope)
+                    _bk_gs = gspread.authorize(_c2)
+                    _bk_ws = _bk_gs.open_by_url(
+                        "https://docs.google.com/spreadsheets/d/1_XesHNaj4MG1_7Vg0EsjokwvcAbrUN--JEmfDMnVidI/").get_worksheet(0)
+                    _bk_val = _salary_parse_amount(_bk_ws.cell(3, 9).value)
+                except Exception:
+                    _bk_val = 0
+                # 이피알몰 I3 (외부 시트)
+                try:
+                    _ep_ws = _bk_gs.open_by_url(
+                        "https://docs.google.com/spreadsheets/d/1kZrvcCaIOBFnJpReGmqGC1bVnFAYH1Jx-ESY-dTS54s/").get_worksheet(0)
+                    _ep_val = _salary_parse_amount(_ep_ws.cell(3, 9).value)
+                except Exception:
+                    _ep_val = 0
+
+                st.session_state["sal_misu"] = _misu_val
+                st.session_state["sal_hm"] = _hm_val
+                st.session_state["sal_bk"] = _bk_val
+                st.session_state["sal_ep"] = _ep_val
+                st.rerun()
+
+        if "sal_misu" in st.session_state:
+            _misu_val = st.session_state["sal_misu"]
+            _hm_val  = st.session_state["sal_hm"]
+            _bk_val  = st.session_state["sal_bk"]
+            _ep_val  = st.session_state["sal_ep"]
+
+            _ei1, _ei2 = st.columns(2)
+            with _ei1:
+                st.metric("📥 미수금 (부가세 포함)", f"{_misu_val:,.0f}원",
+                          delta="앞으로 들어올 예정 금액")
+            with _ei2:
+                _charge_alerts = []
+                _hm_color = "🔴" if _hm_val < 200_000 else "🟢"
+                _bk_color = "🔴" if _bk_val < 200_000 else "🟢"
+                _ep_color = "🔴" if _ep_val < 200_000 else "🟢"
+                st.markdown(f"""
+**충전 잔액 현황**
+- {_hm_color} 한미마: {_hm_val:,.0f}원{"  ⚠️ 충전 필요" if _hm_val < 200_000 else ""}
+- {_bk_color} 비지니스코리아: {_bk_val:,.0f}원{"  ⚠️ 충전 필요" if _bk_val < 200_000 else ""}
+- {_ep_color} 이피알몰: {_ep_val:,.0f}원{"  ⚠️ 충전 필요" if _ep_val < 200_000 else ""}
+""")
+                if _hm_val < 200_000:
+                    _charge_alerts.append(f"한미마 충전 예정 (현재 {_hm_val:,.0f}원)")
+                if _bk_val < 200_000:
+                    _charge_alerts.append(f"비지니스코리아 충전 예정 (현재 {_bk_val:,.0f}원)")
+                if _ep_val < 200_000:
+                    _charge_alerts.append(f"이피알몰 충전 예정 (현재 {_ep_val:,.0f}원)")
+
+            st.session_state["sal_charge_alerts"] = _charge_alerts
+        else:
+            _misu_val = 0
+            _hm_val = 0
+            _bk_val = 0
+            _ep_val = 0
+            _charge_alerts = []
+
+        st.markdown("---")
+
         # ── AI 분석 버튼 ────────────────────────────────────
         st.markdown("### 🤖 AI 급여 분석")
         if st.button("✨ Claude AI 분석 시작", type="primary", key="sal_ai_btn"):
@@ -4255,10 +4339,9 @@ elif menu == "💰 급여 계산기":
                         _e_year = _row[0].strip()
                         _e_month = _row[1].strip()
                         _e_day = _row[2].strip()
-                        _e_name = _row[3].strip()   # D열 사업명
-                        _e_gubun = _row[4].strip()  # E열 구분
-                        _e_name2 = _row[6].strip() if len(_row) > 6 else ""  # G열 입금자명
-                        # 금액: H열(미발행) 또는 I열(발행)
+                        _e_name = _row[3].strip()
+                        _e_gubun = _row[4].strip()
+                        _e_name2 = _row[6].strip() if len(_row) > 6 else ""
                         _e_amt_str = _row[7].strip() if len(_row) > 7 else ""
                         _e_amt2_str = _row[8].strip() if len(_row) > 8 else ""
                         _e_amt = _salary_parse_amount(_e_amt_str) or _salary_parse_amount(_e_amt2_str)
@@ -4266,11 +4349,16 @@ elif menu == "💰 급여 계산기":
                             _expense_items.append(
                                 f"{_e_year} {_e_month} {_e_day} | {_e_name or _e_name2} | {_e_amt:,.0f}원")
                     if _expense_items:
-                        _expense_summary = "\n".join(_expense_items[-100:])  # 최근 100건
+                        _expense_summary = "\n".join(_expense_items[-100:])
                     else:
                         _expense_summary = "지출 데이터 없음"
                 else:
                     _expense_summary = "종합 정산시트 연결 실패"
+
+            # 세션에서 충전 알림 가져오기
+            _charge_alerts = st.session_state.get("sal_charge_alerts", [])
+            _misu_val = st.session_state.get("sal_misu", 0)
+            _charge_str = "\n".join(f"- {a}" for a in _charge_alerts) if _charge_alerts else "- 충전 필요 항목 없음"
 
             with st.spinner("Claude AI 분석 중..."):
                 _client = get_anthropic_client()
@@ -4283,6 +4371,9 @@ elif menu == "💰 급여 계산기":
 - 버즈필터 순이익: {_sbuzz:,.0f}원
 - 합산 총 순이익: {_sp:,.0f}원
 
+### 미수금 (앞으로 들어올 예정 금액)
+- 부가세 포함 미수금: {_misu_val:,.0f}원
+
 ### 통장 잔고
 - 우리은행: {_bank1:,.0f}원
 - 카카오뱅크: {_bank2:,.0f}원
@@ -4291,20 +4382,29 @@ elif menu == "💰 급여 계산기":
 - 안전유보금(항상 유지): 10,000,000원
 - 가용 금액: {_available:,.0f}원
 
+### 매체 충전 잔액 현황
+- 한미마: {_hm_val:,.0f}원
+- 비지니스코리아: {_bk_val:,.0f}원
+- 이피알몰: {_ep_val:,.0f}원
+
+### 충전 예정 항목 (20만원 이하)
+{_charge_str}
+
 ### 최근 지출 내역 (종합 정산시트)
 {_expense_summary}
 
 ## 분석 요청
 1. 지출 패턴 분석 (고정지출/변동지출 파악, 주의할 점)
-2. 이번 달 재무 상태 총평
-3. 적정 급여 추천 금액과 그 근거 (가용금액에서 항상 천만원 유보 후 지급)
-4. 다음 달을 위한 재무 조언
+2. 충전 예정 항목이 있으면 반드시 언급 (급여 전 처리 권장 여부 포함)
+3. 미수금 고려한 실질 재무 상태 총평
+4. 적정 급여 추천 금액과 근거 (가용금액에서 항상 천만원 유보 후 지급)
+5. 다음 달을 위한 재무 조언
 
 간결하고 실용적으로 작성해주세요. 한국어로 답변하세요."""
 
                 _ai_resp = _client.messages.create(
                     model="claude-haiku-4-5-20251001",
-                    max_tokens=1500,
+                    max_tokens=1800,
                     messages=[{"role": "user", "content": _ai_prompt}]
                 )
                 _ai_text = _ai_resp.content[0].text
