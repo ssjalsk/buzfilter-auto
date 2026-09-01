@@ -1305,6 +1305,59 @@ def parse_match_response(text):
     return mc, mb
 
 
+# ==================== 급여 계산기 관련 ====================
+SALARY_SHEET_ID = "1OJkg679B09qvW5hAY_vT35KD0dl5435peGszwv55Fzs"
+
+def get_salary_sheet(worksheet_name):
+    """급여 계산기용 시트 연결 (업무시트 스프레드시트)"""
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        try:
+            creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        except:
+            BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+            creds = ServiceAccountCredentials.from_json_keyfile_name(
+                os.path.join(BASE_DIR, 'service_account.json'), scope)
+        client_gs = gspread.authorize(creds)
+        return client_gs.open_by_url(
+            f"https://docs.google.com/spreadsheets/d/{SALARY_SHEET_ID}/").worksheet(worksheet_name)
+    except Exception as e:
+        st.error(f"시트 연결 실패 ({worksheet_name}): {e}")
+        return None
+
+def _salary_parse_date_g(val):
+    """업무시트 G열 날짜 파싱 '2026. 8. 31' or '2026.8.31' → date"""
+    from datetime import date as _d
+    try:
+        parts = re.findall(r'\d+', str(val))
+        if len(parts) >= 3 and int(parts[0]) >= 2000:
+            return _d(int(parts[0]), int(parts[1]), int(parts[2]))
+    except Exception:
+        pass
+    return None
+
+def _salary_parse_date_bcd(b, c, d):
+    """버즈필터 장부 B(연도)+C(월)+D(일자) 파싱"""
+    from datetime import date as _d
+    try:
+        y = int(re.sub(r'\D', '', str(b)))
+        m = int(re.sub(r'\D', '', str(c)))
+        dy = int(re.sub(r'\D', '', str(d)))
+        if y >= 2000 and 1 <= m <= 12 and 1 <= dy <= 31:
+            return _d(y, m, dy)
+    except Exception:
+        pass
+    return None
+
+def _salary_parse_amount(val):
+    """금액 문자열 → float ('1,234,567' → 1234567.0)"""
+    try:
+        cleaned = re.sub(r'[^\d.-]', '', str(val))
+        return float(cleaned) if cleaned else 0.0
+    except Exception:
+        return 0.0
+
 # ==================== 함소아 보고서 관련 ====================
 
 HAMSOA_SHEET_URL = "https://docs.google.com/spreadsheets/d/1yozxvC3iXhCkbC3yXf5ad6PHaaZC3yQEvEXhpRcnGwc/"
@@ -2478,6 +2531,7 @@ with st.sidebar:
         "🖼️ 배경 흰색 변환",
         "📖 바이럴 백과사전",
         "⭐ 홈페이지 후기 관리",
+        "💰 급여 계산기",
     ], label_visibility="collapsed")
     st.markdown("---")
     st.caption("버즈필터 업무 자동화 시스템")
@@ -4021,3 +4075,248 @@ elif menu == "⭐ 홈페이지 후기 관리":
                             st.success("✅ 구글시트에 저장됐습니다. (Netlify 시크릿 없음)")
                     else:
                         st.error("저장 실패. 시트 연결을 확인해주세요.")
+
+# ==================== 💰 급여 계산기 ====================
+elif menu == "💰 급여 계산기":
+    from datetime import date as _date_cls
+    import calendar as _cal
+
+    st.title("💰 급여 계산기")
+    st.caption("업무시트 + 버즈필터 장부 순이익을 합산하여 이번 달 적정 급여를 산정합니다.")
+    st.markdown("---")
+
+    # ── 기간 선택 ──────────────────────────────────────────
+    _now = datetime.now()
+    _col1, _col2 = st.columns(2)
+    with _col1:
+        _sal_year = st.selectbox("📅 연도", options=[2024, 2025, 2026, 2027],
+                                  index=[2024,2025,2026,2027].index(_now.year) if _now.year in [2024,2025,2026,2027] else 2,
+                                  key="sal_year")
+    with _col2:
+        _sal_month = st.selectbox("📅 월", options=list(range(1, 13)),
+                                   index=_now.month - 1, key="sal_month")
+
+    # 기간: 선택월 10일 ~ 다음달 9일
+    _sal_start = _date_cls(_sal_year, _sal_month, 10)
+    if _sal_month == 12:
+        _sal_end = _date_cls(_sal_year + 1, 1, 9)
+    else:
+        _sal_end = _date_cls(_sal_year, _sal_month + 1, 9)
+
+    st.info(f"📅 계산 기간: **{_sal_start.strftime('%Y.%m.%d')} ~ {_sal_end.strftime('%Y.%m.%d')}**")
+    st.markdown("---")
+
+    # ── 순이익 계산 버튼 ────────────────────────────────────
+    if st.button("📊 순이익 계산하기", type="primary", key="sal_calc"):
+        _biz_profit = 0.0
+        _buzz_profit = 0.0
+        _biz_rows = []
+        _buzz_rows = []
+
+        # 1) 업무시트 G열(송출일) 기준 P열(수익) 합산
+        with st.spinner("업무시트 불러오는 중..."):
+            _ws = get_salary_sheet("업무시트")
+        if _ws:
+            _ws_data = _ws.get_all_values()
+            for _row in _ws_data[1:]:  # 1행 헤더 스킵
+                if len(_row) <= 15:
+                    continue
+                _g_val = _row[6].strip()   # G열 (인덱스 6)
+                _p_val = _row[15].strip()  # P열 (인덱스 15)
+                if not _g_val or not _p_val:
+                    continue
+                _dt = _salary_parse_date_g(_g_val)
+                _amt = _salary_parse_amount(_p_val)
+                if _dt and _sal_start <= _dt <= _sal_end and _amt != 0:
+                    _biz_profit += _amt
+                    _biz_rows.append({"날짜": str(_dt), "수익": _amt})
+            st.success(f"✅ 업무시트: {len(_biz_rows)}건 / {_biz_profit:,.0f}원")
+        else:
+            st.warning("업무시트 연결 실패 — 탭 이름을 확인해주세요.")
+
+        # 2) 버즈필터 장부 B+C+D 날짜 기준 N열(순이익) 합산
+        with st.spinner("버즈필터 장부 불러오는 중..."):
+            _bz = get_sheet("2. 버즈필터 장부")
+        if _bz:
+            _bz_data = _bz.get_all_values()
+            for _row in _bz_data[2:]:  # 2행 헤더 스킵
+                if len(_row) <= 13:
+                    continue
+                _b_val = _row[1].strip()   # B열 (연도)
+                _c_val = _row[2].strip()   # C열 (월)
+                _d_val = _row[3].strip()   # D열 (일자)
+                _n_val = _row[13].strip()  # N열 (순이익)
+                if not _b_val or not _n_val:
+                    continue
+                _dt2 = _salary_parse_date_bcd(_b_val, _c_val, _d_val)
+                _amt2 = _salary_parse_amount(_n_val)
+                if _dt2 and _sal_start <= _dt2 <= _sal_end and _amt2 != 0:
+                    _buzz_profit += _amt2
+                    _buzz_rows.append({"날짜": str(_dt2), "순이익": _amt2})
+            st.success(f"✅ 버즈필터 장부: {len(_buzz_rows)}건 / {_buzz_profit:,.0f}원")
+        else:
+            st.warning("버즈필터 장부 연결 실패")
+
+        _total_profit = _biz_profit + _buzz_profit
+        st.session_state["sal_biz_profit"] = _biz_profit
+        st.session_state["sal_buzz_profit"] = _buzz_profit
+        st.session_state["sal_total_profit"] = _total_profit
+        st.session_state["sal_biz_rows"] = _biz_rows
+        st.session_state["sal_buzz_rows"] = _buzz_rows
+        st.session_state["sal_period"] = f"{_sal_start.strftime('%Y.%m.%d')} ~ {_sal_end.strftime('%Y.%m.%d')}"
+        st.rerun()
+
+    # ── 결과 표시 (세션에 데이터 있을 때) ──────────────────
+    if "sal_total_profit" in st.session_state:
+        _sp = st.session_state["sal_total_profit"]
+        _sbiz = st.session_state["sal_biz_profit"]
+        _sbuzz = st.session_state["sal_buzz_profit"]
+        _period_label = st.session_state.get("sal_period", "")
+
+        st.markdown("### 📊 순이익 집계 결과")
+        _rc1, _rc2, _rc3 = st.columns(3)
+        with _rc1:
+            st.metric("업무시트 수익", f"{_sbiz:,.0f}원")
+        with _rc2:
+            st.metric("버즈필터 순이익", f"{_sbuzz:,.0f}원")
+        with _rc3:
+            st.metric("**합산 총 순이익**", f"{_sp:,.0f}원",
+                      delta=f"{_period_label}")
+
+        with st.expander("📋 업무시트 상세 내역"):
+            if st.session_state.get("sal_biz_rows"):
+                st.dataframe(st.session_state["sal_biz_rows"], use_container_width=True)
+            else:
+                st.caption("해당 기간 데이터 없음")
+
+        with st.expander("📋 버즈필터 장부 상세 내역"):
+            if st.session_state.get("sal_buzz_rows"):
+                st.dataframe(st.session_state["sal_buzz_rows"], use_container_width=True)
+            else:
+                st.caption("해당 기간 데이터 없음")
+
+        st.markdown("---")
+
+        # ── 통장 잔고 수기 입력 ─────────────────────────────
+        st.markdown("### 🏦 현재 통장 잔고 입력")
+        st.caption("실제 통장 잔고를 직접 입력해주세요.")
+        _bc1, _bc2, _bc3 = st.columns(3)
+        with _bc1:
+            _bank1 = st.number_input("우리은행 (원)", min_value=0, step=10000,
+                                      value=st.session_state.get("sal_bank1", 0),
+                                      key="sal_bank1", format="%d")
+        with _bc2:
+            _bank2 = st.number_input("카카오뱅크 (원)", min_value=0, step=10000,
+                                      value=st.session_state.get("sal_bank2", 0),
+                                      key="sal_bank2", format="%d")
+        with _bc3:
+            _bank3 = st.number_input("IBK기업은행 (원)", min_value=0, step=10000,
+                                      value=st.session_state.get("sal_bank3", 0),
+                                      key="sal_bank3", format="%d")
+
+        _total_bank = _bank1 + _bank2 + _bank3
+        _reserve = 10_000_000  # 안전유보금 1천만원
+        _available = _total_bank - _reserve
+
+        st.markdown("---")
+        st.markdown("### 📋 급여 산정")
+        _gc1, _gc2, _gc3 = st.columns(3)
+        with _gc1:
+            st.metric("총 통장 잔고", f"{_total_bank:,.0f}원")
+        with _gc2:
+            st.metric("안전 유보금", f"-{_reserve:,.0f}원", delta="항상 유지")
+        with _gc3:
+            st.metric("가용 금액", f"{_available:,.0f}원",
+                      delta="양수일 때 급여 가능" if _available > 0 else "⚠️ 잔고 부족")
+
+        if _available <= 0:
+            st.error("⚠️ 안전유보금(1천만원) 제외 시 가용 금액이 없습니다. 급여 지급이 어렵습니다.")
+        else:
+            # 기본 추천 급여: 가용금액의 50% (보수적)
+            _suggested = min(_available * 0.5, _sp * 0.3) if _sp > 0 else _available * 0.3
+            _suggested = max(_suggested, 0)
+            st.success(f"💡 **예상 추천 급여: 약 {_suggested:,.0f}원**")
+            st.caption("※ AI 분석 버튼을 누르면 지출 패턴까지 고려한 정밀 추천을 드립니다.")
+
+        st.markdown("---")
+
+        # ── AI 분석 버튼 ────────────────────────────────────
+        st.markdown("### 🤖 AI 급여 분석")
+        if st.button("✨ Claude AI 분석 시작", type="primary", key="sal_ai_btn"):
+            _expense_summary = ""
+            with st.spinner("종합 정산시트 지출 분석 중..."):
+                _jws = get_salary_sheet("종합 정산시트")
+                if _jws:
+                    _jdata = _jws.get_all_values()
+                    _expense_items = []
+                    for _row in _jdata[3:]:  # 3행부터 데이터
+                        if len(_row) < 5:
+                            continue
+                        _e_year = _row[0].strip()
+                        _e_month = _row[1].strip()
+                        _e_day = _row[2].strip()
+                        _e_name = _row[3].strip()   # D열 사업명
+                        _e_gubun = _row[4].strip()  # E열 구분
+                        _e_name2 = _row[6].strip() if len(_row) > 6 else ""  # G열 입금자명
+                        # 금액: H열(미발행) 또는 I열(발행)
+                        _e_amt_str = _row[7].strip() if len(_row) > 7 else ""
+                        _e_amt2_str = _row[8].strip() if len(_row) > 8 else ""
+                        _e_amt = _salary_parse_amount(_e_amt_str) or _salary_parse_amount(_e_amt2_str)
+                        if _e_gubun in ["지출", "경비"] and _e_amt > 0 and _e_year:
+                            _expense_items.append(
+                                f"{_e_year} {_e_month} {_e_day} | {_e_name or _e_name2} | {_e_amt:,.0f}원")
+                    if _expense_items:
+                        _expense_summary = "\n".join(_expense_items[-100:])  # 최근 100건
+                    else:
+                        _expense_summary = "지출 데이터 없음"
+                else:
+                    _expense_summary = "종합 정산시트 연결 실패"
+
+            with st.spinner("Claude AI 분석 중..."):
+                _client = get_anthropic_client()
+                _ai_prompt = f"""당신은 알리고미디어의 재무 분석 AI입니다. 아래 데이터를 분석하여 대표님의 이번 달 적정 급여를 추천해주세요.
+
+## 이번 달 데이터 ({_period_label})
+
+### 순이익
+- 업무시트 수익: {_sbiz:,.0f}원
+- 버즈필터 순이익: {_sbuzz:,.0f}원
+- 합산 총 순이익: {_sp:,.0f}원
+
+### 통장 잔고
+- 우리은행: {_bank1:,.0f}원
+- 카카오뱅크: {_bank2:,.0f}원
+- IBK기업은행: {_bank3:,.0f}원
+- 총 잔고: {_total_bank:,.0f}원
+- 안전유보금(항상 유지): 10,000,000원
+- 가용 금액: {_available:,.0f}원
+
+### 최근 지출 내역 (종합 정산시트)
+{_expense_summary}
+
+## 분석 요청
+1. 지출 패턴 분석 (고정지출/변동지출 파악, 주의할 점)
+2. 이번 달 재무 상태 총평
+3. 적정 급여 추천 금액과 그 근거 (가용금액에서 항상 천만원 유보 후 지급)
+4. 다음 달을 위한 재무 조언
+
+간결하고 실용적으로 작성해주세요. 한국어로 답변하세요."""
+
+                _ai_resp = _client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=1500,
+                    messages=[{"role": "user", "content": _ai_prompt}]
+                )
+                _ai_text = _ai_resp.content[0].text
+
+            st.markdown("#### 🤖 AI 분석 결과")
+            st.markdown(_ai_text)
+
+        # 데이터 초기화 버튼
+        st.markdown("---")
+        if st.button("🔄 초기화", key="sal_reset"):
+            for _k in ["sal_total_profit", "sal_biz_profit", "sal_buzz_profit",
+                        "sal_biz_rows", "sal_buzz_rows", "sal_period"]:
+                if _k in st.session_state:
+                    del st.session_state[_k]
+            st.rerun()
