@@ -4264,19 +4264,28 @@ elif menu == "💰 급여 계산기":
                     _ext_gs_ok = False
                     _ext_errors.append(f"Google 인증 실패: {_e}")
 
-                # ── 언론 매출 통계 J34 — 미수금 ──────────────
+                # ── 언론 매출 통계 J34~J36 스캔 — 미수금 ──────
                 _misu_val = 0
                 try:
                     _misu_ws = get_salary_sheet("언론 매출 통계")
                     if _misu_ws:
-                        _raw = _misu_ws.cell(34, 10).value
-                        _misu_val = _salary_parse_amount(_raw)
-                        if _misu_val == 0 and _raw:
-                            _ext_errors.append(f"언론 매출 통계 J34 원시값: '{_raw}' (파싱 결과 0)")
+                        # J34가 텍스트면 J35, J36까지 순서대로 탐색
+                        _found_cell = None
+                        for _row in [34, 35, 36]:
+                            _raw = _misu_ws.cell(_row, 10).value
+                            _v = _salary_parse_amount(_raw)
+                            if _v != 0:
+                                _misu_val = _v
+                                _found_cell = f"J{_row}"
+                                break
+                        if _misu_val == 0:
+                            # 숫자 없으면 J34 원시값 표시
+                            _raw34 = _misu_ws.cell(34, 10).value
+                            _ext_errors.append(f"언론 매출 통계 J34~J36 금액 없음 (J34 원시값: '{_raw34}')")
                     else:
                         _ext_errors.append("언론 매출 통계 탭 연결 실패 — 탭 이름 확인 필요")
                 except Exception as _e:
-                    _ext_errors.append(f"언론 매출 통계 오류: {_e}")
+                    _ext_errors.append(f"언론 매출 통계 오류: {type(_e).__name__}: {_e!r}")
 
                 # ── 한미마 송출 I3 ─────────────────────────────
                 _hm_val = 0
@@ -4306,7 +4315,7 @@ elif menu == "💰 급여 계산기":
                             _bk_ws = _bk_sp.get_worksheet(0)  # fallback: 첫 번째 탭
                         _bk_val = _salary_parse_amount(_bk_ws.cell(3, 9).value)
                     except Exception as _e:
-                        _ext_errors.append(f"비지니스코리아 오류: {_e}")
+                        _ext_errors.append(f"비지니스코리아 오류: {type(_e).__name__}: {_e!r}")
 
                 # ── 이피알몰 I3 (외부 시트 gid=0 → 첫 번째 탭) ──
                 _ep_val = 0
@@ -4318,7 +4327,7 @@ elif menu == "💰 급여 계산기":
                         _ep_ws = _ep_sp.get_worksheet(0)
                         _ep_val = _salary_parse_amount(_ep_ws.cell(3, 9).value)
                     except Exception as _e:
-                        _ext_errors.append(f"이피알몰 오류: {_e}")
+                        _ext_errors.append(f"이피알몰 오류: {type(_e).__name__}: {_e!r}")
 
                 st.session_state["sal_misu"] = _misu_val
                 st.session_state["sal_hm"]   = _hm_val
