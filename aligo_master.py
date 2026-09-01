@@ -4245,45 +4245,86 @@ elif menu == "💰 급여 계산기":
         _ext_col1, _ext_col2 = st.columns(2)
         with _ext_col1:
             if st.button("🔄 미수금 / 충전잔액 불러오기", key="sal_ext_load"):
-                # 언론 매출 통계 J34 — 미수금
+                _ext_errors = []
+
+                # ── 공용 gspread 클라이언트 생성 ──────────────
                 try:
-                    _misu_ws = get_salary_sheet("언론 매출 통계")
-                    _misu_val = _salary_parse_amount(_misu_ws.cell(34, 10).value) if _misu_ws else 0
-                except Exception:
-                    _misu_val = 0
-                # 한미마 송출 I3
-                try:
-                    _hm_ws = get_salary_sheet("한미마 송출")
-                    _hm_val = _salary_parse_amount(_hm_ws.cell(3, 9).value) if _hm_ws else 0
-                except Exception:
-                    _hm_val = 0
-                # 비지니스코리아 I3 (외부 시트)
-                try:
-                    _scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+                    _scope = ["https://spreadsheets.google.com/feeds",
+                              "https://www.googleapis.com/auth/drive"]
                     try:
-                        _c2 = ServiceAccountCredentials.from_json_keyfile_dict(
+                        _ec = ServiceAccountCredentials.from_json_keyfile_dict(
                             json.loads(st.secrets["GOOGLE_CREDENTIALS"]), _scope)
                     except Exception:
-                        _c2 = ServiceAccountCredentials.from_json_keyfile_name(
-                            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'service_account.json'), _scope)
-                    _bk_gs = gspread.authorize(_c2)
-                    _bk_ws = _bk_gs.open_by_url(
-                        "https://docs.google.com/spreadsheets/d/1_XesHNaj4MG1_7Vg0EsjokwvcAbrUN--JEmfDMnVidI/").get_worksheet(0)
-                    _bk_val = _salary_parse_amount(_bk_ws.cell(3, 9).value)
-                except Exception:
-                    _bk_val = 0
-                # 이피알몰 I3 (외부 시트)
+                        _ec = ServiceAccountCredentials.from_json_keyfile_name(
+                            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                         'service_account.json'), _scope)
+                    _ext_gs = gspread.authorize(_ec)
+                    _ext_gs_ok = True
+                except Exception as _e:
+                    _ext_gs_ok = False
+                    _ext_errors.append(f"Google 인증 실패: {_e}")
+
+                # ── 언론 매출 통계 J34 — 미수금 ──────────────
+                _misu_val = 0
                 try:
-                    _ep_ws = _bk_gs.open_by_url(
-                        "https://docs.google.com/spreadsheets/d/1kZrvcCaIOBFnJpReGmqGC1bVnFAYH1Jx-ESY-dTS54s/").get_worksheet(0)
-                    _ep_val = _salary_parse_amount(_ep_ws.cell(3, 9).value)
-                except Exception:
-                    _ep_val = 0
+                    _misu_ws = get_salary_sheet("언론 매출 통계")
+                    if _misu_ws:
+                        _raw = _misu_ws.cell(34, 10).value
+                        _misu_val = _salary_parse_amount(_raw)
+                        if _misu_val == 0 and _raw:
+                            _ext_errors.append(f"언론 매출 통계 J34 원시값: '{_raw}' (파싱 결과 0)")
+                    else:
+                        _ext_errors.append("언론 매출 통계 탭 연결 실패 — 탭 이름 확인 필요")
+                except Exception as _e:
+                    _ext_errors.append(f"언론 매출 통계 오류: {_e}")
+
+                # ── 한미마 송출 I3 ─────────────────────────────
+                _hm_val = 0
+                try:
+                    _hm_ws = get_salary_sheet("한미마 송출")
+                    if _hm_ws:
+                        _hm_val = _salary_parse_amount(_hm_ws.cell(3, 9).value)
+                    else:
+                        _ext_errors.append("한미마 송출 탭 연결 실패")
+                except Exception as _e:
+                    _ext_errors.append(f"한미마 송출 오류: {_e}")
+
+                # ── 비지니스코리아 I3 (외부 시트 gid=2058666063) ──
+                _bk_val = 0
+                if _ext_gs_ok:
+                    try:
+                        _bk_sp = _ext_gs.open_by_url(
+                            "https://docs.google.com/spreadsheets/d/"
+                            "1_XesHNaj4MG1_7Vg0EsjokwvcAbrUN--JEmfDMnVidI/")
+                        # gid=2058666063 인 탭 찾기
+                        _bk_ws = None
+                        for _w in _bk_sp.worksheets():
+                            if _w.id == 2058666063:
+                                _bk_ws = _w
+                                break
+                        if _bk_ws is None:
+                            _bk_ws = _bk_sp.get_worksheet(0)  # fallback: 첫 번째 탭
+                        _bk_val = _salary_parse_amount(_bk_ws.cell(3, 9).value)
+                    except Exception as _e:
+                        _ext_errors.append(f"비지니스코리아 오류: {_e}")
+
+                # ── 이피알몰 I3 (외부 시트 gid=0 → 첫 번째 탭) ──
+                _ep_val = 0
+                if _ext_gs_ok:
+                    try:
+                        _ep_sp = _ext_gs.open_by_url(
+                            "https://docs.google.com/spreadsheets/d/"
+                            "1kZrvcCaIOBFnJpReGmqGC1bVnFAYH1Jx-ESY-dTS54s/")
+                        _ep_ws = _ep_sp.get_worksheet(0)
+                        _ep_val = _salary_parse_amount(_ep_ws.cell(3, 9).value)
+                    except Exception as _e:
+                        _ext_errors.append(f"이피알몰 오류: {_e}")
 
                 st.session_state["sal_misu"] = _misu_val
-                st.session_state["sal_hm"] = _hm_val
-                st.session_state["sal_bk"] = _bk_val
-                st.session_state["sal_ep"] = _ep_val
+                st.session_state["sal_hm"]   = _hm_val
+                st.session_state["sal_bk"]   = _bk_val
+                st.session_state["sal_ep"]   = _ep_val
+                st.session_state["sal_ext_errors"] = _ext_errors
                 st.rerun()
 
         if "sal_misu" in st.session_state:
@@ -4291,6 +4332,9 @@ elif menu == "💰 급여 계산기":
             _hm_val  = st.session_state["sal_hm"]
             _bk_val  = st.session_state["sal_bk"]
             _ep_val  = st.session_state["sal_ep"]
+            # 에러 메시지 표시
+            for _err in st.session_state.get("sal_ext_errors", []):
+                st.warning(f"⚠️ {_err}")
 
             _ei1, _ei2 = st.columns(2)
             with _ei1:
