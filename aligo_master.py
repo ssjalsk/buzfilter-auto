@@ -423,6 +423,20 @@ def delete_viral_post(slug):
     return False
 
 
+def update_viral_post(slug, title, hashtags, summary, html_body):
+    """slug로 게시글 구글시트 해당 행 업데이트 (제목/태그/요약/본문)"""
+    ws = get_viral_sheet()
+    if not ws:
+        return False
+    rows = ws.get_all_values()
+    for i, row in enumerate(rows):
+        if len(row) > 1 and row[1] == slug:
+            row_num = i + 1
+            ws.update(f"C{row_num}:F{row_num}", [[title, hashtags, summary, html_body]])
+            return True
+    return False
+
+
 def make_slug(title):
     """제목에서 URL slug 생성 (타임스탬프 + 제목)"""
     ts = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -3596,7 +3610,7 @@ elif menu == "📖 바이럴 백과사전":
     st.markdown("## 📖 바이럴 백과사전")
     st.caption("게시글을 관리하고 aligomedia.co.kr/blog/ 에 발행합니다.")
 
-    _vb_tab1, _vb_tab2 = st.tabs(["📋 게시글 목록", "✍️ 새 글 작성"])
+    _vb_tab1, _vb_tab2, _vb_tab3 = st.tabs(["📋 게시글 목록", "✍️ 새 글 작성", "✏️ 글 수정"])
 
     # ── 탭1: 게시글 목록 ──
     with _vb_tab1:
@@ -3656,23 +3670,123 @@ elif menu == "📖 바이럴 백과사전":
                     st.markdown(
                         f"[🔗 게시글 보기 (새 창)](https://aligomedia.co.kr/blog/{_vb_p['slug']}/)",
                         unsafe_allow_html=True)
-                    if st.button("🗑️ 삭제", key=f"vb_del_{_vb_p['slug']}", type="secondary"):
-                        with st.spinner("삭제 중..."):
-                            _del_ok = delete_viral_post(_vb_p["slug"])
-                            if _del_ok:
-                                _remaining = [x for x in _vb_posts if x["slug"] != _vb_p["slug"]]
-                                _del_idx_html = generate_blog_index_html(_remaining).encode("utf-8")
-                                _vtok = st.secrets.get("NETLIFY_TOKEN", "")
-                                _vsid = st.secrets.get("NETLIFY_SITE_ID", "")
-                                if _vtok and _vsid:
-                                    deploy_blog_incremental(
-                                        _vtok, _vsid,
-                                        {"blog/index.html": _del_idx_html})
-                                get_viral_posts.clear()
-                                st.success("✅ 삭제 완료!")
-                                st.rerun()
+                    _btn_edit_col, _btn_del_col = st.columns([1, 1])
+                    with _btn_edit_col:
+                        if st.button("✏️ 수정", key=f"vb_edit_{_vb_p['slug']}", use_container_width=True):
+                            st.session_state["vb_edit_slug"]    = _vb_p["slug"]
+                            st.session_state["vb_edit_title"]   = _vb_p["제목"]
+                            st.session_state["vb_edit_tags"]    = _vb_p["해시태그"]
+                            st.session_state["vb_edit_summary"] = _vb_p["요약"]
+                            st.session_state["vb_edit_html"]    = _vb_p["본문HTML"]
+                            st.info("✏️ '글 수정' 탭으로 이동해서 수정하세요.")
+                    with _btn_del_col:
+                        if st.button("🗑️ 삭제", key=f"vb_del_{_vb_p['slug']}", type="secondary", use_container_width=True):
+                            with st.spinner("삭제 중..."):
+                                _del_ok = delete_viral_post(_vb_p["slug"])
+                                if _del_ok:
+                                    _remaining = [x for x in _vb_posts if x["slug"] != _vb_p["slug"]]
+                                    _del_idx_html = generate_blog_index_html(_remaining).encode("utf-8")
+                                    _vtok = st.secrets.get("NETLIFY_TOKEN", "")
+                                    _vsid = st.secrets.get("NETLIFY_SITE_ID", "")
+                                    if _vtok and _vsid:
+                                        deploy_blog_incremental(
+                                            _vtok, _vsid,
+                                            {"blog/index.html": _del_idx_html})
+                                    get_viral_posts.clear()
+                                    st.success("✅ 삭제 완료!")
+                                    st.rerun()
+                                else:
+                                    st.error("삭제 실패. 시트 연결을 확인해주세요.")
+
+    # ── 탭3: 글 수정 ──
+    with _vb_tab3:
+        st.markdown("### ✏️ 글 수정")
+        _edit_slug = st.session_state.get("vb_edit_slug", "")
+        if not _edit_slug:
+            st.info("📋 '게시글 목록' 탭에서 수정할 글의 **✏️ 수정** 버튼을 먼저 클릭하세요.")
+        else:
+            st.caption(f"수정 중: `{_edit_slug}`")
+            _ed_title   = st.text_input("📌 제목 *", value=st.session_state.get("vb_edit_title", ""),   key="ed_title")
+            _ed_tags    = st.text_input("🏷️ 해시태그 (쉼표로 구분)", value=st.session_state.get("vb_edit_tags", ""),    key="ed_tags")
+            _ed_summary = st.text_area("📝 요약 *", value=st.session_state.get("vb_edit_summary", ""), key="ed_summary", height=90)
+            st.markdown("---")
+            st.markdown("**📄 본문 HTML**")
+            st.caption("기존 본문 HTML을 직접 편집하거나 전체 교체할 수 있습니다.")
+            _ed_html = st.text_area(
+                "본문 HTML",
+                value=st.session_state.get("vb_edit_html", ""),
+                key="ed_html",
+                height=350,
+                label_visibility="collapsed"
+            )
+            st.markdown("---")
+            _ed_c1, _ed_c2 = st.columns([2, 1])
+            with _ed_c1:
+                _ed_publish = st.button("💾 수정 발행", key="ed_publish_btn", type="primary", use_container_width=True)
+            with _ed_c2:
+                if st.button("✕ 취소", key="ed_cancel_btn", use_container_width=True):
+                    for _k in ["vb_edit_slug","vb_edit_title","vb_edit_tags","vb_edit_summary","vb_edit_html"]:
+                        st.session_state.pop(_k, None)
+                    st.rerun()
+
+            if _ed_publish:
+                _ed_err = []
+                if not (_ed_title or "").strip():
+                    _ed_err.append("제목을 입력해주세요.")
+                if not (_ed_summary or "").strip():
+                    _ed_err.append("요약을 입력해주세요.")
+                if not (_ed_html or "").strip():
+                    _ed_err.append("본문이 비어 있습니다.")
+                if _ed_err:
+                    for _e in _ed_err:
+                        st.error(_e)
+                else:
+                    _etok = st.secrets.get("NETLIFY_TOKEN", "")
+                    _esid = st.secrets.get("NETLIFY_SITE_ID", "")
+                    with st.spinner("수정 저장 및 배포 중..."):
+                        _ed_ok = update_viral_post(
+                            _edit_slug,
+                            _ed_title.strip(),
+                            (_ed_tags or "").strip(),
+                            _ed_summary.strip(),
+                            _ed_html.strip()
+                        )
+                    if _ed_ok:
+                        get_viral_posts.clear()
+                        _ed_all_posts = get_viral_posts()
+                        # 수정된 포스트 데이터로 HTML 재생성
+                        _ed_post_data = next(
+                            (p for p in _ed_all_posts if p["slug"] == _edit_slug), None)
+                        if _ed_post_data:
+                            _ed_post_html = generate_post_html(_ed_post_data).encode("utf-8")
+                            _ed_idx_html  = generate_blog_index_html(_ed_all_posts).encode("utf-8")
+                            _ed_sitemap   = generate_sitemap_xml(_ed_all_posts).encode("utf-8")
+                            _ed_posts_json = generate_posts_json(_ed_all_posts)
+                            if _etok and _esid:
+                                _ed_dep_ok, _ed_dep_msg = deploy_blog_incremental(
+                                    _etok, _esid,
+                                    {
+                                        f"blog/{_edit_slug}/index.html": _ed_post_html,
+                                        "blog/index.html": _ed_idx_html,
+                                        "blog/posts.json": _ed_posts_json,
+                                        "sitemap.xml": _ed_sitemap,
+                                        "robots.txt": ROBOTS_TXT.encode("utf-8"),
+                                    }
+                                )
+                                if _ed_dep_ok:
+                                    for _k in ["vb_edit_slug","vb_edit_title","vb_edit_tags","vb_edit_summary","vb_edit_html"]:
+                                        st.session_state.pop(_k, None)
+                                    st.success("✅ 수정 발행 완료!")
+                                    st.markdown(f"[🔗 수정된 글 보기](https://aligomedia.co.kr/blog/{_edit_slug}/)")
+                                    st.rerun()
+                                else:
+                                    st.error(f"배포 실패: {_ed_dep_msg}")
                             else:
-                                st.error("삭제 실패. 시트 연결을 확인해주세요.")
+                                st.error("NETLIFY_TOKEN / NETLIFY_SITE_ID 시크릿을 확인해주세요.")
+                        else:
+                            st.error("수정된 글을 시트에서 찾을 수 없습니다. 잠시 후 다시 시도해주세요.")
+                    else:
+                        st.error("구글시트 업데이트 실패. 시트 연결을 확인해주세요.")
 
     # ── 탭2: 새 글 작성 ──
     with _vb_tab2:
