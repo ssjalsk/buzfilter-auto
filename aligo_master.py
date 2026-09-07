@@ -3707,15 +3707,32 @@ elif menu == "📖 바이럴 백과사전":
             _ed_title   = st.text_input("📌 제목 *", value=st.session_state.get("vb_edit_title", ""),   key="ed_title")
             _ed_tags    = st.text_input("🏷️ 해시태그 (쉼표로 구분)", value=st.session_state.get("vb_edit_tags", ""), key="ed_tags")
             _ed_summary = st.text_area("📝 요약 *", value=st.session_state.get("vb_edit_summary", ""), key="ed_summary", height=90)
-            st.markdown("**📄 본문 HTML**")
-            st.caption("기존 본문 HTML을 직접 편집할 수 있습니다.")
-            _ed_html = st.text_area(
-                "본문 HTML",
-                value=st.session_state.get("vb_edit_html", ""),
-                key="ed_html",
-                height=350,
-                label_visibility="collapsed"
-            )
+            st.markdown("**📄 본문 편집**")
+            st.caption("글자 크기·색상·이미지 등 자유롭게 수정하세요.")
+            try:
+                from streamlit_quill import st_quill as _st_quill
+                _ed_html_raw = _st_quill(
+                    value=st.session_state.get("vb_edit_html", ""),
+                    html=True,
+                    key="ed_quill_body",
+                    placeholder="본문을 편집하세요..."
+                )
+                _ed_html_skey = "__ed_quill_body_val"
+                if _ed_html_raw is not None:
+                    _clean = (_ed_html_raw or "").strip()
+                    if _clean and _clean not in ("<p><br></p>", "<p></p>"):
+                        st.session_state[_ed_html_skey] = _ed_html_raw
+                _ed_html = st.session_state.get(_ed_html_skey,
+                           st.session_state.get("vb_edit_html", ""))
+            except ImportError:
+                # quill 없으면 textarea fallback
+                _ed_html = st.text_area(
+                    "본문 HTML",
+                    value=st.session_state.get("vb_edit_html", ""),
+                    key="ed_html",
+                    height=350,
+                    label_visibility="collapsed"
+                )
             st.markdown("---")
             _ed_c1, _ed_c2 = st.columns([2, 1])
             with _ed_c1:
