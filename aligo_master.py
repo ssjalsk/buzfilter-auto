@@ -3610,7 +3610,7 @@ elif menu == "📖 바이럴 백과사전":
     st.markdown("## 📖 바이럴 백과사전")
     st.caption("게시글을 관리하고 aligomedia.co.kr/blog/ 에 발행합니다.")
 
-    _vb_tab1, _vb_tab2, _vb_tab3 = st.tabs(["📋 게시글 목록", "✍️ 새 글 작성", "✏️ 글 수정"])
+    _vb_tab1, _vb_tab2 = st.tabs(["📋 게시글 목록", "✍️ 새 글 작성"])
 
     # ── 탭1: 게시글 목록 ──
     with _vb_tab1:
@@ -3678,7 +3678,7 @@ elif menu == "📖 바이럴 백과사전":
                             st.session_state["vb_edit_tags"]    = _vb_p["해시태그"]
                             st.session_state["vb_edit_summary"] = _vb_p["요약"]
                             st.session_state["vb_edit_html"]    = _vb_p["본문HTML"]
-                            st.info("✏️ '글 수정' 탭으로 이동해서 수정하세요.")
+                            st.rerun()
                     with _btn_del_col:
                         if st.button("🗑️ 삭제", key=f"vb_del_{_vb_p['slug']}", type="secondary", use_container_width=True):
                             with st.spinner("삭제 중..."):
@@ -3698,20 +3698,17 @@ elif menu == "📖 바이럴 백과사전":
                                 else:
                                     st.error("삭제 실패. 시트 연결을 확인해주세요.")
 
-    # ── 탭3: 글 수정 ──
-    with _vb_tab3:
-        st.markdown("### ✏️ 글 수정")
+    # ── 탭1 하단: 글 수정 폼 (수정 버튼 클릭 시 표시) ──
+    with _vb_tab1:
         _edit_slug = st.session_state.get("vb_edit_slug", "")
-        if not _edit_slug:
-            st.info("📋 '게시글 목록' 탭에서 수정할 글의 **✏️ 수정** 버튼을 먼저 클릭하세요.")
-        else:
-            st.caption(f"수정 중: `{_edit_slug}`")
-            _ed_title   = st.text_input("📌 제목 *", value=st.session_state.get("vb_edit_title", ""),   key="ed_title")
-            _ed_tags    = st.text_input("🏷️ 해시태그 (쉼표로 구분)", value=st.session_state.get("vb_edit_tags", ""),    key="ed_tags")
-            _ed_summary = st.text_area("📝 요약 *", value=st.session_state.get("vb_edit_summary", ""), key="ed_summary", height=90)
+        if _edit_slug:
             st.markdown("---")
+            st.markdown(f"### ✏️ 글 수정 중: `{_edit_slug}`")
+            _ed_title   = st.text_input("📌 제목 *", value=st.session_state.get("vb_edit_title", ""),   key="ed_title")
+            _ed_tags    = st.text_input("🏷️ 해시태그 (쉼표로 구분)", value=st.session_state.get("vb_edit_tags", ""), key="ed_tags")
+            _ed_summary = st.text_area("📝 요약 *", value=st.session_state.get("vb_edit_summary", ""), key="ed_summary", height=90)
             st.markdown("**📄 본문 HTML**")
-            st.caption("기존 본문 HTML을 직접 편집하거나 전체 교체할 수 있습니다.")
+            st.caption("기존 본문 HTML을 직접 편집할 수 있습니다.")
             _ed_html = st.text_area(
                 "본문 HTML",
                 value=st.session_state.get("vb_edit_html", ""),
@@ -3731,12 +3728,9 @@ elif menu == "📖 바이럴 백과사전":
 
             if _ed_publish:
                 _ed_err = []
-                if not (_ed_title or "").strip():
-                    _ed_err.append("제목을 입력해주세요.")
-                if not (_ed_summary or "").strip():
-                    _ed_err.append("요약을 입력해주세요.")
-                if not (_ed_html or "").strip():
-                    _ed_err.append("본문이 비어 있습니다.")
+                if not (_ed_title or "").strip():   _ed_err.append("제목을 입력해주세요.")
+                if not (_ed_summary or "").strip(): _ed_err.append("요약을 입력해주세요.")
+                if not (_ed_html or "").strip():    _ed_err.append("본문이 비어 있습니다.")
                 if _ed_err:
                     for _e in _ed_err:
                         st.error(_e)
@@ -3745,22 +3739,17 @@ elif menu == "📖 바이럴 백과사전":
                     _esid = st.secrets.get("NETLIFY_SITE_ID", "")
                     with st.spinner("수정 저장 및 배포 중..."):
                         _ed_ok = update_viral_post(
-                            _edit_slug,
-                            _ed_title.strip(),
-                            (_ed_tags or "").strip(),
-                            _ed_summary.strip(),
-                            _ed_html.strip()
+                            _edit_slug, _ed_title.strip(),
+                            (_ed_tags or "").strip(), _ed_summary.strip(), _ed_html.strip()
                         )
                     if _ed_ok:
                         get_viral_posts.clear()
-                        _ed_all_posts = get_viral_posts()
-                        # 수정된 포스트 데이터로 HTML 재생성
-                        _ed_post_data = next(
-                            (p for p in _ed_all_posts if p["slug"] == _edit_slug), None)
+                        _ed_all_posts  = get_viral_posts()
+                        _ed_post_data  = next((p for p in _ed_all_posts if p["slug"] == _edit_slug), None)
                         if _ed_post_data:
-                            _ed_post_html = generate_post_html(_ed_post_data).encode("utf-8")
-                            _ed_idx_html  = generate_blog_index_html(_ed_all_posts).encode("utf-8")
-                            _ed_sitemap   = generate_sitemap_xml(_ed_all_posts).encode("utf-8")
+                            _ed_post_html  = generate_post_html(_ed_post_data).encode("utf-8")
+                            _ed_idx_html   = generate_blog_index_html(_ed_all_posts).encode("utf-8")
+                            _ed_sitemap    = generate_sitemap_xml(_ed_all_posts).encode("utf-8")
                             _ed_posts_json = generate_posts_json(_ed_all_posts)
                             if _etok and _esid:
                                 _ed_dep_ok, _ed_dep_msg = deploy_blog_incremental(
