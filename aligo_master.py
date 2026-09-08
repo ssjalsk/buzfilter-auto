@@ -423,20 +423,6 @@ def delete_viral_post(slug):
     return False
 
 
-def update_viral_post(slug, title, hashtags, summary, html_body):
-    """slug로 게시글 구글시트 해당 행 업데이트 (제목/태그/요약/본문)"""
-    ws = get_viral_sheet()
-    if not ws:
-        return False
-    rows = ws.get_all_values()
-    for i, row in enumerate(rows):
-        if len(row) > 1 and row[1] == slug:
-            row_num = i + 1
-            ws.update(f"C{row_num}:F{row_num}", [[title, hashtags, summary, html_body]])
-            return True
-    return False
-
-
 def make_slug(title):
     """제목에서 URL slug 생성 (타임스탬프 + 제목)"""
     ts = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -447,16 +433,18 @@ def make_slug(title):
 
 @st.cache_data(ttl=300)
 def get_view_count(slug):
-    """CountAPI에서 조회수 읽기 (5분 캐시, 증가 없음)
-    namespace=aligomedia, key=slug"""
+    """hits.seeyoufarm.com에서 조회수 가져오기 (5분 캐시)"""
+    import urllib.parse as _ulp
     try:
-        import urllib.parse as _ulp
-        safe_slug = _ulp.quote(slug, safe="")
+        encoded = _ulp.quote(
+            f"https://aligomedia.co.kr/blog/{slug}/", safe="")
         r = requests.get(
-            f"https://api.countapi.xyz/get/aligomedia/{safe_slug}",
+            f"https://hits.seeyoufarm.com/api/count/incr/badge.svg?url={encoded}",
             timeout=8)
         if r.status_code == 200:
-            return int(r.json().get("value", 0) or 0)
+            nums = re.findall(r">(\d+)<", r.text)
+            valid = [int(n) for n in nums if n.isdigit() and len(n) <= 7]
+            return max(valid) if valid else 0
         return 0
     except Exception:
         return 0
@@ -473,6 +461,7 @@ def generate_post_html(post):
     summary_esc = post["요약"].replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')[:160]
     slug = post["slug"]
     date_str = post["날짜"]
+    hits_url = f"https%3A%2F%2Faligomedia.co.kr%2Fblog%2F{slug}%2F"
     return f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -553,23 +542,8 @@ footer{{padding:40px 5%;background:#fff;border-top:1px solid #eee;}}
 <div class="post-body">{body}</div>
 </main>
 <div class="post-views">
-👁 조회수 <span id="vc-display">...</span>
+<img src="https://hits.seeyoufarm.com/api/count/incr/badge.svg?url={hits_url}&count_bg=%232e4a8f&title_bg=%23555555&title=%EC%A1%B0%ED%9A%8C%EC%88%98&edge_flat=false" alt="조회수" height="22" loading="lazy">
 </div>
-<script>
-(function(){{
-  var slug = "{slug}";
-  fetch("https://api.countapi.xyz/hit/aligomedia/" + encodeURIComponent(slug))
-    .then(function(r){{return r.json();}})
-    .then(function(d){{
-      var el = document.getElementById("vc-display");
-      if(el) el.textContent = (d && d.value ? Number(d.value).toLocaleString() : "0") + "회";
-    }})
-    .catch(function(){{
-      var el = document.getElementById("vc-display");
-      if(el) el.textContent = "";
-    }});
-}})();
-</script>
 <div class="post-footer">
 <a href="/blog/" class="back-btn">← 목록으로 돌아가기</a>
 </div>
@@ -835,206 +809,104 @@ footer{{padding:50px 5%;background:#fff;border-top:1px solid #eee;}}
 </html>"""
 
 
-def push_files_to_github(new_files, commit_message="홈페이지 업데이트"):
-    """
-    GitHub Git Data API로 파일들을 단일 커밋으로 푸시.
-    new_files: {path: bytes}
-    단일 커밋 → Netlify 자동 배포 1회 트리거 → Netlify 크레딧 0 소비.
-    GITHUB_TOKEN 시크릿 필요 (repo 권한 PAT).
-    """
-    import base64 as _b64
-
-    _gh_token = st.secrets.get("GITHUB_TOKEN", "")
-    if not _gh_token:
-        return False, (
-            "GITHUB_TOKEN 시크릿이 없습니다.\n"
-            "github.com → Settings → Developer settings → Personal access tokens (classic) →\n"
-            "Generate new token → repo 권한 선택 → 발급 후 Streamlit Cloud 시크릿에 GITHUB_TOKEN으로 추가해주세요."
-        )
-
-    OWNER  = "ssjalsk"
-    REPO   = "aligomedia-web"
-    BRANCH = "main"
-    API    = "https://api.github.com"
-    hdrs   = {
-        "Authorization": f"Bearer {_gh_token}",
-        "Accept": "application/vnd.github.v3+json",
-        "Content-Type": "application/json"
-    }
-
-    try:
-        # 1. 현재 HEAD 커밋 SHA
-        r = requests.get(f"{API}/repos/{OWNER}/{REPO}/git/ref/heads/{BRANCH}",
-                         headers=hdrs, timeout=15)
-        if r.status_code != 200:
-            return False, f"GitHub 브랜치 조회 실패 (HTTP {r.status_code}): {r.text[:200]}"
-        head_sha = r.json()["object"]["sha"]
-
-        # 2. HEAD 커밋의 base 트리 SHA
-        r2 = requests.get(f"{API}/repos/{OWNER}/{REPO}/git/commits/{head_sha}",
-                          headers=hdrs, timeout=15)
-        if r2.status_code != 200:
-            return False, f"GitHub 커밋 조회 실패 (HTTP {r2.status_code})"
-        base_tree_sha = r2.json()["tree"]["sha"]
-
-        # 3. 각 파일 blob 생성
-        tree_items = []
-        for fpath, fbytes in new_files.items():
-            fpath_clean = fpath.lstrip("/")
-            try:
-                text_content = fbytes.decode("utf-8")
-                payload = {"content": text_content, "encoding": "utf-8"}
-            except (UnicodeDecodeError, ValueError):
-                payload = {"content": _b64.b64encode(fbytes).decode("ascii"),
-                           "encoding": "base64"}
-            rb = requests.post(f"{API}/repos/{OWNER}/{REPO}/git/blobs",
-                               headers=hdrs, json=payload, timeout=30)
-            if rb.status_code not in [200, 201]:
-                return False, f"Blob 생성 실패 ({fpath_clean}): HTTP {rb.status_code}"
-            tree_items.append({
-                "path": fpath_clean,
-                "mode": "100644",
-                "type": "blob",
-                "sha": rb.json()["sha"]
-            })
-
-        # 4. 새 트리 생성
-        rt = requests.post(f"{API}/repos/{OWNER}/{REPO}/git/trees",
-                           headers=hdrs,
-                           json={"base_tree": base_tree_sha, "tree": tree_items},
-                           timeout=30)
-        if rt.status_code not in [200, 201]:
-            return False, f"트리 생성 실패: HTTP {rt.status_code}"
-        new_tree_sha = rt.json()["sha"]
-
-        # 5. 새 커밋 생성
-        rc = requests.post(f"{API}/repos/{OWNER}/{REPO}/git/commits",
-                           headers=hdrs,
-                           json={"message": commit_message,
-                                 "tree": new_tree_sha,
-                                 "parents": [head_sha]},
-                           timeout=30)
-        if rc.status_code not in [200, 201]:
-            return False, f"커밋 생성 실패: HTTP {rc.status_code}"
-        new_commit_sha = rc.json()["sha"]
-
-        # 6. 브랜치 레퍼런스 업데이트
-        rr = requests.patch(f"{API}/repos/{OWNER}/{REPO}/git/refs/heads/{BRANCH}",
-                            headers=hdrs,
-                            json={"sha": new_commit_sha},
-                            timeout=15)
-        if rr.status_code not in [200, 201]:
-            return False, f"브랜치 업데이트 실패: HTTP {rr.status_code}"
-
-        # 7. Netlify Deploy Hook 호출 (GitHub push → Netlify 자동 배포)
-        _hook = st.secrets.get("NETLIFY_DEPLOY_HOOK", "")
-        if _hook:
-            try:
-                requests.post(_hook, timeout=10)
-            except Exception:
-                pass  # hook 호출 실패해도 GitHub 푸시는 성공으로 처리
-
-        return True, f"GitHub 푸시 성공 ({len(new_files)}개 파일) — Netlify 배포 시작"
-
-    except Exception as e:
-        return False, f"GitHub 푸시 오류: {e}"
-
-
-def _netlify_get_live_files(token, site_id):
-    """
-    현재 실제 퍼블리시된 배포의 전체 파일 목록 {'/path': 'sha1'} 반환.
-    - /deploys 최신 배포 기준 X → error 배포 포함돼 사이트 날아가는 버그
-    - /sites/{id} 에서 published_deploy.id 로 현재 라이브 배포만 정확히 조회
-    """
-    hdrs = {"Authorization": f"Bearer {token}"}
-    try:
-        # 현재 퍼블리시된 배포 ID 조회 (error/processing 배포 제외)
-        rs = requests.get(f"https://api.netlify.com/api/v1/sites/{site_id}",
-                          headers=hdrs, timeout=15)
-        if rs.status_code != 200:
-            return {}
-        published_id = rs.json().get("published_deploy", {}).get("id", "")
-        if not published_id:
-            return {}
-        rf = requests.get(f"https://api.netlify.com/api/v1/deploys/{published_id}/files",
-                          headers=hdrs, timeout=30)
-        if rf.status_code != 200:
-            return {}
-        return {f["id"]: f["sha"] for f in rf.json() if "id" in f and "sha" in f}
-    except Exception:
-        return {}
-
-
 def deploy_blog_incremental(token, site_id, new_files):
     """
-    Netlify API 안전 증분 배포.
-    - 현재 라이브 파일 전체 조회 → 새 파일과 합쳐서 완전한 파일 맵 생성
-    - 기존 파일은 Netlify 캐시에서 자동 재사용, 새 파일만 실제 업로드
-    - 기존 파일이 배포에서 사라지는 문제 방지
+    Netlify 해시 기반 증분 배포.
+    new_files: {path: bytes} (예: {"blog/index.html": b"...", "blog/slug/index.html": b"..."})
+    기존 사이트 파일을 유지하면서 지정된 파일만 추가/갱신한다.
     """
     import hashlib as _hl
-    hdrs = {"Authorization": f"Bearer {token}"}
+    # 유효성 검사
+    if not token:
+        return False, "NETLIFY_TOKEN 시크릿이 비어 있습니다. Streamlit Cloud 시크릿 설정을 확인해주세요."
+    if not site_id:
+        return False, "NETLIFY_SITE_ID 시크릿이 비어 있습니다. Streamlit Cloud 시크릿 설정을 확인해주세요."
+    headers_auth = {"Authorization": f"Bearer {token}"}
 
-    # 1. 현재 라이브 파일 전체 목록 가져오기
-    existing_map = _netlify_get_live_files(token, site_id)
+    # 1. 최신 배포 파일 목록 가져오기
+    try:
+        r = requests.get(
+            f"https://api.netlify.com/api/v1/sites/{site_id}/deploys?per_page=10",
+            headers=headers_auth, timeout=20)
+        deploys = r.json() if r.status_code == 200 else []
+        latest_id = None
+        for d in (deploys if isinstance(deploys, list) else []):
+            if d.get("state") == "ready":
+                latest_id = d["id"]
+                break
+
+        existing_files = {}
+        if latest_id:
+            r2 = requests.get(
+                f"https://api.netlify.com/api/v1/deploys/{latest_id}/files",
+                headers=headers_auth, timeout=20)
+            if r2.status_code == 200:
+                for f in r2.json():
+                    path = f.get("id", "").lstrip("/")
+                    sha = f.get("sha", "")
+                    if path and sha:
+                        existing_files[path] = sha
+    except Exception as e:
+        return False, f"기존 배포 파일 조회 실패: {e}"
 
     # 2. 새 파일 SHA1 계산
-    sha_to_content = {}
-    new_sha_map = {}
-    for fpath, fbytes in new_files.items():
-        norm = f"/{fpath.lstrip('/')}"
-        sha1 = _hl.sha1(fbytes).hexdigest()
-        new_sha_map[norm] = sha1
-        sha_to_content[sha1] = (fpath.lstrip("/"), fbytes)
+    new_sha = {}
+    content_by_sha = {}
+    for path, content in new_files.items():
+        path_clean = path.lstrip("/")
+        sha1 = _hl.sha1(content).hexdigest()
+        new_sha[path_clean] = sha1
+        content_by_sha[sha1] = (path_clean, content)
 
-    # 3. 전체 파일 맵 = 기존 파일 + 새 파일 (새 파일이 기존 파일 덮어씀)
-    full_map = {**existing_map, **new_sha_map}
+    # 3. 병합 (기존 유지 + 새 파일 덮어쓰기)
+    merged = {**existing_files, **new_sha}
 
-    # 4. 배포 생성
-    r2 = requests.post(
-        f"https://api.netlify.com/api/v1/sites/{site_id}/deploys",
-        headers={**hdrs, "Content-Type": "application/json"},
-        json={"files": full_map}, timeout=30)
-    if r2.status_code not in [200, 201]:
-        return False, f"배포 생성 실패: HTTP {r2.status_code} — {r2.text[:200]}"
-
-    deploy_id = r2.json()["id"]
-    required   = r2.json().get("required", [])
-
-    # 5. 실제로 필요한 파일만 업로드 (새 파일만 해당, 기존 파일은 Netlify 캐시 재사용)
-    for sha1 in required:
-        if sha1 not in sha_to_content:
-            # 기존 파일인데 캐시 누락 — 무시 (Netlify가 처리)
-            continue
-        fpath, fdata = sha_to_content[sha1]
-        ru = requests.put(
-            f"https://api.netlify.com/api/v1/deploys/{deploy_id}/files/{fpath}",
-            headers={**hdrs, "Content-Type": "application/octet-stream"},
-            data=fdata, timeout=30)
-        if ru.status_code not in [200, 201]:
-            return False, f"파일 업로드 실패 ({fpath}): HTTP {ru.status_code}"
-
-    # 6. GitHub에도 병행 푸시 (버전 관리 — 실패해도 배포에 영향 없음)
+    # 4. 새 배포 생성
     try:
-        titles = list(new_files.keys())
-        label = ", ".join(titles[:2]) + ("..." if len(titles) > 2 else "")
-        push_files_to_github(new_files, commit_message=f"업데이트: {label}")
-    except Exception:
-        pass
+        r3 = requests.post(
+            f"https://api.netlify.com/api/v1/sites/{site_id}/deploys",
+            headers={**headers_auth, "Content-Type": "application/json"},
+            json={"files": {f"/{k}": v for k, v in merged.items()}},
+            timeout=30)
+        if r3.status_code not in [200, 201]:
+            return False, (f"배포 생성 실패 (HTTP {r3.status_code})\n"
+                           f"site_id: {site_id}\n"
+                           f"응답: {r3.text[:500]}")
+        deploy_data = r3.json()
+        new_deploy_id = deploy_data["id"]
+        required = deploy_data.get("required", [])
+    except Exception as e:
+        return False, f"배포 생성 오류: {e}"
 
-    return True, f"배포 완료 ({len(new_files)}개 변경, {len(required)}개 실제 업로드)"
+    # 5. 필요한 파일만 업로드
+    upload_errors = []
+    for sha1 in required:
+        if sha1 not in content_by_sha:
+            continue
+        file_path, file_content = content_by_sha[sha1]
+        try:
+            ru = requests.put(
+                f"https://api.netlify.com/api/v1/deploys/{new_deploy_id}/files/{file_path}",
+                headers={**headers_auth, "Content-Type": "application/octet-stream"},
+                data=file_content, timeout=30)
+            if ru.status_code not in [200, 201]:
+                upload_errors.append(f"{file_path}: {ru.status_code}")
+        except Exception as e:
+            upload_errors.append(f"{file_path}: {e}")
+
+    if upload_errors:
+        return False, "일부 파일 업로드 실패:\n" + "\n".join(upload_errors)
+    return True, f"배포 성공 (deploy_id: {new_deploy_id})"
 
 
 def upload_blog_image(token, site_id, image_bytes, original_filename):
     """
-    블로그 이미지를 Netlify에 안전하게 업로드.
-    기존 파일 목록 유지 + 새 이미지 추가.
+    블로그 이미지를 Netlify에 업로드하고 공개 URL을 반환.
+    blog/images/{timestamp}-{filename} 경로에 저장.
     """
-    import hashlib as _hl
     ts = datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
     safe_name = re.sub(r'[^\w.\-]', '_', original_filename)
     img_path = f"blog/images/{ts}-{safe_name}"
-
     ok, msg = deploy_blog_incremental(token, site_id, {img_path: image_bytes})
     if ok:
         return f"https://aligomedia.co.kr/{img_path}", "성공"
@@ -1318,59 +1190,6 @@ def parse_match_response(text):
                 mb = '미등록'
     return mc, mb
 
-
-# ==================== 급여 계산기 관련 ====================
-SALARY_SHEET_ID = "1OJkg679B09qvW5hAY_vT35KD0dl5435peGszwv55Fzs"
-
-def get_salary_sheet(worksheet_name):
-    """급여 계산기용 시트 연결 (업무시트 스프레드시트)"""
-    try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        try:
-            creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        except:
-            BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-            creds = ServiceAccountCredentials.from_json_keyfile_name(
-                os.path.join(BASE_DIR, 'service_account.json'), scope)
-        client_gs = gspread.authorize(creds)
-        return client_gs.open_by_url(
-            f"https://docs.google.com/spreadsheets/d/{SALARY_SHEET_ID}/").worksheet(worksheet_name)
-    except Exception as e:
-        st.error(f"시트 연결 실패 ({worksheet_name}): {e}")
-        return None
-
-def _salary_parse_date_g(val):
-    """업무시트 G열 날짜 파싱 '2026. 8. 31' or '2026.8.31' → date"""
-    from datetime import date as _d
-    try:
-        parts = re.findall(r'\d+', str(val))
-        if len(parts) >= 3 and int(parts[0]) >= 2000:
-            return _d(int(parts[0]), int(parts[1]), int(parts[2]))
-    except Exception:
-        pass
-    return None
-
-def _salary_parse_date_bcd(b, c, d):
-    """버즈필터 장부 B(연도)+C(월)+D(일자) 파싱"""
-    from datetime import date as _d
-    try:
-        y = int(re.sub(r'\D', '', str(b)))
-        m = int(re.sub(r'\D', '', str(c)))
-        dy = int(re.sub(r'\D', '', str(d)))
-        if y >= 2000 and 1 <= m <= 12 and 1 <= dy <= 31:
-            return _d(y, m, dy)
-    except Exception:
-        pass
-    return None
-
-def _salary_parse_amount(val):
-    """금액 문자열 → float ('1,234,567' → 1234567.0)"""
-    try:
-        cleaned = re.sub(r'[^\d.-]', '', str(val))
-        return float(cleaned) if cleaned else 0.0
-    except Exception:
-        return 0.0
 
 # ==================== 함소아 보고서 관련 ====================
 
@@ -2545,7 +2364,7 @@ with st.sidebar:
         "🖼️ 배경 흰색 변환",
         "📖 바이럴 백과사전",
         "⭐ 홈페이지 후기 관리",
-        "💰 급여 계산기",
+        "📰 언론 업무",
     ], label_visibility="collapsed")
     st.markdown("---")
     st.caption("버즈필터 업무 자동화 시스템")
@@ -3606,6 +3425,156 @@ HTML:
 # ─────────────────────────────────────────────
 # 📖 바이럴 백과사전 메뉴
 # ─────────────────────────────────────────────
+elif menu == "📰 언론 업무":
+    # ─────────────────────────────────────────────
+    # 📰 언론 업무 — 미수금 대시보드 / 고객 DB / 은행 잔고
+    # ─────────────────────────────────────────────
+    ALIGO_SHEET_ID = "1OJkg679B09qvW5hAY_vT35KD0dl5435peGszwv55Fzs"  # 원본 업무시트
+
+    @st.cache_resource(ttl=60)
+    def get_aligo_ws(tab_name):
+        try:
+            scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+            try:
+                creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+                _creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            except Exception:
+                BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+                _creds = ServiceAccountCredentials.from_json_keyfile_name(
+                    os.path.join(BASE_DIR,'service_account.json'), scope)
+            _gc = gspread.authorize(_creds)
+            _ss = _gc.open_by_key(ALIGO_SHEET_ID)
+            return _ss.worksheet(tab_name)
+        except Exception as _e:
+            return None
+
+    st.markdown("## 📰 언론 업무 대시보드")
+    ln_tab1, ln_tab2, ln_tab3 = st.tabs(["💸 미수금 현황", "👥 고객 DB", "🏦 은행 잔고"])
+
+    # ── 탭1: 미수금 현황 ─────────────────────────────────────
+    with ln_tab1:
+        st.markdown("### 💸 미수금 현황 (입금확인 건)")
+        st.caption("업무시트 E열='입금확인' + C열='언론' 기준 실시간 조회")
+        if st.button("🔄 새로고침", key="misu_refresh"):
+            st.cache_resource.clear()
+        ws_work = get_aligo_ws("업무시트")
+        if ws_work is None:
+            st.error("업무시트 연결 실패 — service_account.json 또는 시트 권한을 확인하세요.")
+        else:
+            with st.spinner("미수금 목록 불러오는 중..."):
+                _all = ws_work.get_all_values()
+                _misu_rows = []
+                for _i, _row in enumerate(_all[1:], 2):
+                    if len(_row) < 14: continue
+                    if _row[2].strip() != '언론': continue
+                    if _row[4].strip() != '입금확인': continue
+                    _name   = _row[1].strip()
+                    _date   = _row[6].strip()
+                    _media  = _row[8].strip()
+                    _mat    = _row[10].strip()
+                    _cost   = int(float(_row[13].replace(',','').strip() or 0)) if _row[13].strip() else 0
+                    _s_val  = _row[18].strip() if len(_row) > 18 else ''
+                    try: _paid = int(float(_s_val.replace(',',''))) if _s_val and _s_val.replace(',','').replace('.','').lstrip('-').isdigit() else 0
+                    except: _paid = 0
+                    _remain = max(0, _cost - _paid)
+                    _url    = f"https://docs.google.com/spreadsheets/d/{ALIGO_SHEET_ID}/edit#gid=1675857415&range=A{_i}"
+                    _misu_rows.append({
+                        "고객명": _name, "송출일": _date, "매체사": _media,
+                        "소재": _mat, "청구금액": _cost, "입금됨": _paid,
+                        "미수잔액": _remain, "VAT포함": round(_remain*1.1),
+                        "업무시트 링크": _url
+                    })
+
+            if not _misu_rows:
+                st.success("✅ 현재 미수금 없음!")
+            else:
+                import pandas as pd
+                _df = pd.DataFrame(_misu_rows)
+                _total = _df["미수잔액"].sum()
+                _total_vat = _df["VAT포함"].sum()
+
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("📋 미수 건수", f"{len(_df)}건")
+                col_b.metric("💰 미수 합계", f"{_total:,.0f}원")
+                col_c.metric("💰 VAT포함", f"{_total_vat:,.0f}원")
+
+                st.markdown("---")
+                # 링크 컬럼 클릭 가능하게
+                _df["이동"] = _df["업무시트 링크"].apply(lambda u: f'<a href="{u}" target="_blank">→ 이동</a>')
+                _display = _df[["고객명","송출일","매체사","소재","청구금액","입금됨","미수잔액","VAT포함","이동"]]
+                st.write(_display.to_html(escape=False, index=False), unsafe_allow_html=True)
+
+                # 고객별 합계
+                st.markdown("---")
+                st.markdown("#### 📊 고객별 미수금 합계")
+                _by_cust = _df.groupby("고객명")["미수잔액"].sum().sort_values(ascending=False).reset_index()
+                _by_cust.columns = ["고객명", "미수잔액"]
+                st.dataframe(_by_cust, use_container_width=True)
+
+    # ── 탭2: 고객 DB ────────────────────────────────────────
+    with ln_tab2:
+        st.markdown("### 👥 고객 DB")
+        st.caption("고객별 진행 이력 및 잔여금액 조회")
+        if st.button("🔄 새로고침", key="cust_refresh"):
+            st.cache_resource.clear()
+        ws_cust = get_aligo_ws("고객정보")
+        if ws_cust is None:
+            st.error("고객정보 탭 연결 실패")
+        else:
+            with st.spinner("고객 DB 불러오는 중..."):
+                _cust_all = ws_cust.get_all_values()
+            if len(_cust_all) < 4: st.info("데이터 없음")
+            else:
+                import pandas as pd
+                _cust_df = pd.DataFrame(_cust_all[3:], columns=_cust_all[2])
+                _cust_df = _cust_df[_cust_df.iloc[:,0].str.strip() != '']
+                # 검색
+                _search = st.text_input("🔍 고객명 검색", placeholder="고객명 일부 입력...", key="cust_search")
+                if _search:
+                    _cust_df = _cust_df[_cust_df.iloc[:,0].str.contains(_search, na=False)]
+                st.dataframe(_cust_df.head(100), use_container_width=True)
+                st.caption(f"총 {len(_cust_df)}개 고객사 표시 중")
+
+    # ── 탭3: 은행 잔고 ──────────────────────────────────────
+    with ln_tab3:
+        st.markdown("### 🏦 은행별 잔고 현황")
+        st.caption("종합 정산시트 기준 실시간 잔고")
+        if st.button("🔄 새로고침", key="bank_refresh"):
+            st.cache_resource.clear()
+        ws_sum = get_aligo_ws("종합 정산시트")
+        if ws_sum is None:
+            st.error("종합 정산시트 연결 실패")
+        else:
+            with st.spinner("잔고 불러오는 중..."):
+                _sum_vals = ws_sum.get('O7:T10')
+            if not _sum_vals or len(_sum_vals) < 4:
+                st.info("잔고 데이터 없음")
+            else:
+                import pandas as pd
+                _bank_header = _sum_vals[0]  # O7:T7 헤더
+                _bank_data   = _sum_vals[1:] # O8:T10 데이터
+                _bank_names  = ["우리은행","카카오뱅크","IBK기업은행"]
+                _bank_rows   = []
+                for _bi, _brow in enumerate(_bank_data):
+                    if len(_brow) < 6: continue
+                    _bank_rows.append({
+                        "은행": _bank_names[_bi] if _bi < len(_bank_names) else f"은행{_bi+1}",
+                        "총 입금액":  _brow[1] if len(_brow) > 1 else "",
+                        "총 출금액":  _brow[2] if len(_brow) > 2 else "",
+                        "데이터 잔고": _brow[3] if len(_brow) > 3 else "",
+                        "실 잔액":    _brow[4] if len(_brow) > 4 else "",
+                        "현재 잔액":  _brow[5] if len(_brow) > 5 else "",
+                    })
+                if _bank_rows:
+                    _bdf = pd.DataFrame(_bank_rows)
+                    st.dataframe(_bdf, use_container_width=True)
+                    # 현재잔액 합계
+                    def _to_num(v):
+                        try: return int(str(v).replace(',','').strip())
+                        except: return 0
+                    _total_balance = sum(_to_num(r["현재 잔액"]) for r in _bank_rows)
+                    st.metric("💰 3개 은행 합산 현재잔액", f"{_total_balance:,.0f}원")
+
 elif menu == "📖 바이럴 백과사전":
     st.markdown("## 📖 바이럴 백과사전")
     st.caption("게시글을 관리하고 aligomedia.co.kr/blog/ 에 발행합니다.")
@@ -3670,129 +3639,23 @@ elif menu == "📖 바이럴 백과사전":
                     st.markdown(
                         f"[🔗 게시글 보기 (새 창)](https://aligomedia.co.kr/blog/{_vb_p['slug']}/)",
                         unsafe_allow_html=True)
-                    _btn_edit_col, _btn_del_col = st.columns([1, 1])
-                    with _btn_edit_col:
-                        if st.button("✏️ 수정", key=f"vb_edit_{_vb_p['slug']}", use_container_width=True):
-                            st.session_state["vb_edit_slug"]    = _vb_p["slug"]
-                            st.session_state["vb_edit_title"]   = _vb_p["제목"]
-                            st.session_state["vb_edit_tags"]    = _vb_p["해시태그"]
-                            st.session_state["vb_edit_summary"] = _vb_p["요약"]
-                            st.session_state["vb_edit_html"]    = _vb_p["본문HTML"]
-                            st.rerun()
-                    with _btn_del_col:
-                        if st.button("🗑️ 삭제", key=f"vb_del_{_vb_p['slug']}", type="secondary", use_container_width=True):
-                            with st.spinner("삭제 중..."):
-                                _del_ok = delete_viral_post(_vb_p["slug"])
-                                if _del_ok:
-                                    _remaining = [x for x in _vb_posts if x["slug"] != _vb_p["slug"]]
-                                    _del_idx_html = generate_blog_index_html(_remaining).encode("utf-8")
-                                    _vtok = st.secrets.get("NETLIFY_TOKEN", "")
-                                    _vsid = st.secrets.get("NETLIFY_SITE_ID", "")
-                                    if _vtok and _vsid:
-                                        deploy_blog_incremental(
-                                            _vtok, _vsid,
-                                            {"blog/index.html": _del_idx_html})
-                                    get_viral_posts.clear()
-                                    st.success("✅ 삭제 완료!")
-                                    st.rerun()
-                                else:
-                                    st.error("삭제 실패. 시트 연결을 확인해주세요.")
-
-    # ── 탭1 하단: 글 수정 폼 (수정 버튼 클릭 시 표시) ──
-    with _vb_tab1:
-        _edit_slug = st.session_state.get("vb_edit_slug", "")
-        if _edit_slug:
-            st.markdown("---")
-            st.markdown(f"### ✏️ 글 수정 중: `{_edit_slug}`")
-            _ed_title   = st.text_input("📌 제목 *", value=st.session_state.get("vb_edit_title", ""),   key="ed_title")
-            _ed_tags    = st.text_input("🏷️ 해시태그 (쉼표로 구분)", value=st.session_state.get("vb_edit_tags", ""), key="ed_tags")
-            _ed_summary = st.text_area("📝 요약 *", value=st.session_state.get("vb_edit_summary", ""), key="ed_summary", height=90)
-            st.markdown("**📄 본문 편집**")
-            st.caption("글자 크기·색상·이미지 등 자유롭게 수정하세요.")
-            try:
-                from streamlit_quill import st_quill as _st_quill
-                _ed_html_raw = _st_quill(
-                    value=st.session_state.get("vb_edit_html", ""),
-                    html=True,
-                    key="ed_quill_body",
-                    placeholder="본문을 편집하세요..."
-                )
-                _ed_html_skey = "__ed_quill_body_val"
-                if _ed_html_raw is not None:
-                    _clean = (_ed_html_raw or "").strip()
-                    if _clean and _clean not in ("<p><br></p>", "<p></p>"):
-                        st.session_state[_ed_html_skey] = _ed_html_raw
-                _ed_html = st.session_state.get(_ed_html_skey,
-                           st.session_state.get("vb_edit_html", ""))
-            except ImportError:
-                # quill 없으면 textarea fallback
-                _ed_html = st.text_area(
-                    "본문 HTML",
-                    value=st.session_state.get("vb_edit_html", ""),
-                    key="ed_html",
-                    height=350,
-                    label_visibility="collapsed"
-                )
-            st.markdown("---")
-            _ed_c1, _ed_c2 = st.columns([2, 1])
-            with _ed_c1:
-                _ed_publish = st.button("💾 수정 발행", key="ed_publish_btn", type="primary", use_container_width=True)
-            with _ed_c2:
-                if st.button("✕ 취소", key="ed_cancel_btn", use_container_width=True):
-                    for _k in ["vb_edit_slug","vb_edit_title","vb_edit_tags","vb_edit_summary","vb_edit_html"]:
-                        st.session_state.pop(_k, None)
-                    st.rerun()
-
-            if _ed_publish:
-                _ed_err = []
-                if not (_ed_title or "").strip():   _ed_err.append("제목을 입력해주세요.")
-                if not (_ed_summary or "").strip(): _ed_err.append("요약을 입력해주세요.")
-                if not (_ed_html or "").strip():    _ed_err.append("본문이 비어 있습니다.")
-                if _ed_err:
-                    for _e in _ed_err:
-                        st.error(_e)
-                else:
-                    _etok = st.secrets.get("NETLIFY_TOKEN", "")
-                    _esid = st.secrets.get("NETLIFY_SITE_ID", "")
-                    with st.spinner("수정 저장 및 배포 중..."):
-                        _ed_ok = update_viral_post(
-                            _edit_slug, _ed_title.strip(),
-                            (_ed_tags or "").strip(), _ed_summary.strip(), _ed_html.strip()
-                        )
-                    if _ed_ok:
-                        get_viral_posts.clear()
-                        _ed_all_posts  = get_viral_posts()
-                        _ed_post_data  = next((p for p in _ed_all_posts if p["slug"] == _edit_slug), None)
-                        if _ed_post_data:
-                            _ed_post_html  = generate_post_html(_ed_post_data).encode("utf-8")
-                            _ed_idx_html   = generate_blog_index_html(_ed_all_posts).encode("utf-8")
-                            _ed_sitemap    = generate_sitemap_xml(_ed_all_posts).encode("utf-8")
-                            _ed_posts_json = generate_posts_json(_ed_all_posts)
-                            if _etok and _esid:
-                                _ed_dep_ok, _ed_dep_msg = deploy_blog_incremental(
-                                    _etok, _esid,
-                                    {
-                                        f"blog/{_edit_slug}/index.html": _ed_post_html,
-                                        "blog/index.html": _ed_idx_html,
-                                        "blog/posts.json": _ed_posts_json,
-                                        "sitemap.xml": _ed_sitemap,
-                                        "robots.txt": ROBOTS_TXT.encode("utf-8"),
-                                    }
-                                )
-                                if _ed_dep_ok:
-                                    for _k in ["vb_edit_slug","vb_edit_title","vb_edit_tags","vb_edit_summary","vb_edit_html"]:
-                                        st.session_state.pop(_k, None)
-                                    st.success("✅ 수정 발행 완료!")
-                                    st.markdown(f"[🔗 수정된 글 보기](https://aligomedia.co.kr/blog/{_edit_slug}/)")
-                                    st.rerun()
-                                else:
-                                    st.error(f"배포 실패: {_ed_dep_msg}")
+                    if st.button("🗑️ 삭제", key=f"vb_del_{_vb_p['slug']}", type="secondary"):
+                        with st.spinner("삭제 중..."):
+                            _del_ok = delete_viral_post(_vb_p["slug"])
+                            if _del_ok:
+                                _remaining = [x for x in _vb_posts if x["slug"] != _vb_p["slug"]]
+                                _del_idx_html = generate_blog_index_html(_remaining).encode("utf-8")
+                                _vtok = st.secrets.get("NETLIFY_TOKEN", "")
+                                _vsid = st.secrets.get("NETLIFY_SITE_ID", "")
+                                if _vtok and _vsid:
+                                    deploy_blog_incremental(
+                                        _vtok, _vsid,
+                                        {"blog/index.html": _del_idx_html})
+                                get_viral_posts.clear()
+                                st.success("✅ 삭제 완료!")
+                                st.rerun()
                             else:
-                                st.error("NETLIFY_TOKEN / NETLIFY_SITE_ID 시크릿을 확인해주세요.")
-                        else:
-                            st.error("수정된 글을 시트에서 찾을 수 없습니다. 잠시 후 다시 시도해주세요.")
-                    else:
-                        st.error("구글시트 업데이트 실패. 시트 연결을 확인해주세요.")
+                                st.error("삭제 실패. 시트 연결을 확인해주세요.")
 
     # ── 탭2: 새 글 작성 ──
     with _vb_tab2:
@@ -3861,15 +3724,12 @@ elif menu == "📖 바이럴 백과사전":
                         html=True,
                         key=f"q_{_bid}"
                     )
-                    # rerun 후에도 내용 보존 (삭제 시에도 빈 값으로 갱신 — BUG-02)
+                    # rerun 후에도 내용 보존
                     _skey = f"__vbtxt_{_bid}"
                     if _raw is not None:
                         _clean = (_raw or "").strip()
                         if _clean and _clean not in ("<p><br></p>", "<p></p>"):
                             st.session_state[_skey] = _raw
-                        else:
-                            # 내용이 지워진 경우 session_state도 비워줌
-                            st.session_state[_skey] = ""
                 else:
                     _raw = st.text_area(
                         "텍스트 입력", height=150,
@@ -3880,17 +3740,10 @@ elif menu == "📖 바이럴 백과사전":
 
             elif _blk["type"] == "image":
                 _stored_url = _blk.get("url")
-                _stored_b64 = _blk.get("b64")  # 로컬 미리보기용 base64
                 if _stored_url:
-                    # 로컬 bytes 우선 사용 (Netlify 배포 지연 무관)
-                    if _stored_b64:
-                        import base64 as _b64m
-                        st.image(_b64m.b64decode(_stored_b64), width=420)
-                    else:
-                        st.image(_stored_url, width=420)
+                    st.image(_stored_url, width=420)
                     if st.button("🔄 이미지 변경", key=f"vbchg_{_bid}"):
                         _vb_blocks[_bi]["url"] = None
-                        _vb_blocks[_bi]["b64"] = None
                         st.rerun()
                 else:
                     _img_file = st.file_uploader(
@@ -3899,22 +3752,20 @@ elif menu == "📖 바이럴 백과사전":
                         key=f"imgup_{_bid}"
                     )
                     if _img_file:
-                        # BUG-03: NETLIFY_TOKEN이 아닌 GITHUB_TOKEN으로 실제 업로드하므로 GITHUB_TOKEN 체크
-                        _vbtok = st.secrets.get("NETLIFY_TOKEN", "")  # 시그니처 호환용 (미사용)
+                        _vbtok = st.secrets.get("NETLIFY_TOKEN", "")
                         _vbsid = st.secrets.get("NETLIFY_SITE_ID", "")
-                        _vbghk = st.secrets.get("GITHUB_TOKEN", "")
-                        if not _vbghk:
-                            st.error("❌ GITHUB_TOKEN 시크릿이 없습니다. Streamlit Cloud 시크릿 설정을 확인하세요.")
+                        if not _vbtok:
+                            st.error("❌ NETLIFY_TOKEN 시크릿이 없습니다. Streamlit Cloud 시크릿 설정을 확인하세요.")
+                        elif not _vbsid:
+                            st.error("❌ NETLIFY_SITE_ID 시크릿이 없습니다. Streamlit Cloud 시크릿 설정을 확인하세요.")
                         else:
-                            _img_bytes = _img_file.read()
                             with st.spinner(f"{_img_file.name} 업로드 중..."):
                                 _iurl, _imsg = upload_blog_image(
-                                    _vbtok, _vbsid, _img_bytes, _img_file.name)
+                                    _vbtok, _vbsid, _img_file.read(), _img_file.name)
                             if _iurl:
-                                import base64 as _b64m
                                 _vb_blocks[_bi]["url"] = _iurl
-                                _vb_blocks[_bi]["b64"] = _b64m.b64encode(_img_bytes).decode()
-                                # BUG-04: st.rerun() 이후 표시되지 않으므로 rerun 전 표시 제거 (rerun 후 b64 미리보기로 표시됨)
+                                st.image(_iurl, width=420)
+                                st.success("✅ 업로드 완료!")
                                 st.rerun()
                             else:
                                 st.error(f"업로드 실패: {_imsg}")
@@ -3931,11 +3782,6 @@ elif menu == "📖 바이럴 백과사전":
             st.rerun()
 
         if _vb_to_delete is not None:
-            # BUG-06: 삭제된 블록의 session_state 텍스트 키도 함께 정리
-            _del_bid = _vb_blocks[_vb_to_delete]["id"]
-            _del_skey = f"__vbtxt_{_del_bid}"
-            if _del_skey in st.session_state:
-                del st.session_state[_del_skey]
             _vb_blocks.pop(_vb_to_delete)
             st.rerun()
 
@@ -3972,11 +3818,6 @@ elif menu == "📖 바이럴 백과사전":
                 _vb_err.append("요약을 입력해주세요.")
             if not _vb_body_final.strip():
                 _vb_err.append("본문 블록에 내용을 입력해주세요.")
-            # BUG-05: 이미지 없는 이미지 블록 경고
-            _empty_img_blocks = [i+1 for i, b in enumerate(_vb_blocks)
-                                  if b["type"] == "image" and not b.get("url")]
-            if _empty_img_blocks:
-                _vb_err.append(f"이미지 블록 {_empty_img_blocks}번에 이미지가 없습니다. 이미지를 업로드하거나 블록을 삭제해주세요.")
             if _vb_err:
                 for _e in _vb_err:
                     st.error(_e)
@@ -4012,21 +3853,6 @@ elif menu == "📖 바이럴 백과사전":
                         _vb_posts_json = generate_posts_json(_vb_all_posts)
 
                         if _vtok2 and _vsid2:
-                            # 이미지 블록의 바이트를 발행 배포에 함께 포함
-                            # (별도 이미지 업로드 배포가 아직 published 안 됐을 수 있어 누락 방지)
-                            import base64 as _b64pub
-                            _vb_img_deploy = {}
-                            for _blk in _vb_blocks:
-                                if (_blk["type"] == "image"
-                                        and _blk.get("url") and _blk.get("b64")):
-                                    try:
-                                        _ibytes = _b64pub.b64decode(_blk["b64"])
-                                        _ipath  = _blk["url"].replace(
-                                            "https://aligomedia.co.kr/", "")
-                                        _vb_img_deploy[_ipath] = _ibytes
-                                    except Exception:
-                                        pass
-
                             _vb_ok, _vb_msg = deploy_blog_incremental(
                                 _vtok2, _vsid2,
                                 {
@@ -4035,66 +3861,23 @@ elif menu == "📖 바이럴 백과사전":
                                     "blog/posts.json": _vb_posts_json,
                                     "sitemap.xml": _vb_sitemap,
                                     "robots.txt": ROBOTS_TXT.encode("utf-8"),
-                                    **_vb_img_deploy,  # 이미지 파일 확실히 포함
                                 }
                             )
                             if _vb_ok:
-                                # BUG-01: 발행 후 블록 초기화 시 이전 텍스트 session_state도 함께 삭제
-                                for _old_blk in st.session_state.get("vb_blocks", []):
-                                    _old_key = f"__vbtxt_{_old_blk['id']}"
-                                    if _old_key in st.session_state:
-                                        del st.session_state[_old_key]
+                                # 발행 후 블록 초기화
                                 st.session_state["vb_blocks"] = [
                                     {"type": "text", "id": "blk_init", "url": None}]
-                                # blk_init 초기화
-                                st.session_state["__vbtxt_blk_init"] = ""
                                 st.success("✅ 발행 완료!")
                                 st.markdown(
                                     f"🔗 **게시글 주소:** https://aligomedia.co.kr/blog/{_vb_slug}/")
                                 st.balloons()
                             else:
-                                st.error(f"배포 실패: {_vb_msg}")
+                                st.error(f"Netlify 배포 실패: {_vb_msg}")
                                 st.info("구글시트에는 저장되었습니다.")
                         else:
-                            st.warning("NETLIFY_TOKEN 시크릿이 없어 홈페이지 배포는 건너뜁니다.\n구글시트에는 저장되었습니다.")
+                            st.warning("Netlify 시크릿 설정이 없어 홈페이지 배포는 건너뜁니다.\n구글시트에는 저장되었습니다.")
                     else:
                         st.error("구글시트 저장 실패. 시트 연결을 확인해주세요.")
-
-        # ── 전체 글 재배포 (복구용) ──
-        st.markdown("---")
-        with st.expander("🔧 긴급 복구 — 전체 글 재배포"):
-            st.caption("홈페이지에 글이 안 올라가거나 링크가 깨진 경우 클릭. 구글시트의 모든 글을 읽어 전체 재배포합니다.")
-            if st.button("🔄 전체 글 재배포 실행", key="vb_full_redeploy", type="primary"):
-                _rd_tok = st.secrets.get("NETLIFY_TOKEN", "")
-                _rd_sid = st.secrets.get("NETLIFY_SITE_ID", "")
-                if not _rd_tok or not _rd_sid:
-                    st.error("NETLIFY_TOKEN / NETLIFY_SITE_ID 시크릿 필요")
-                else:
-                    with st.spinner("구글시트에서 전체 글 로딩 및 재배포 중..."):
-                        try:
-                            get_viral_posts.clear()
-                            _rd_all = get_viral_posts()
-                            if not _rd_all:
-                                st.warning("구글시트에 글이 없습니다.")
-                            else:
-                                _rd_files = {}
-                                for _rp in _rd_all:
-                                    _rslug = _rp.get("slug", "")
-                                    if not _rslug:
-                                        continue
-                                    _rhtml = generate_post_html(_rp).encode("utf-8")
-                                    _rd_files[f"blog/{_rslug}/index.html"] = _rhtml
-                                _rd_files["blog/index.html"] = generate_blog_index_html(_rd_all).encode("utf-8")
-                                _rd_files["blog/posts.json"] = generate_posts_json(_rd_all)
-                                _rd_files["sitemap.xml"]     = generate_sitemap_xml(_rd_all).encode("utf-8")
-                                _rd_files["robots.txt"]      = ROBOTS_TXT.encode("utf-8")
-                                _rd_ok, _rd_msg = deploy_blog_incremental(_rd_tok, _rd_sid, _rd_files)
-                                if _rd_ok:
-                                    st.success(f"✅ 전체 재배포 완료! {len(_rd_all)}개 글 반영")
-                                else:
-                                    st.error(f"❌ 재배포 실패: {_rd_msg}")
-                        except Exception as _rde:
-                            st.error(f"오류: {_rde}")
 
 # ⭐ 홈페이지 후기 관리 메뉴
 elif menu == "⭐ 홈페이지 후기 관리":
@@ -4195,410 +3978,3 @@ elif menu == "⭐ 홈페이지 후기 관리":
                             st.success("✅ 구글시트에 저장됐습니다. (Netlify 시크릿 없음)")
                     else:
                         st.error("저장 실패. 시트 연결을 확인해주세요.")
-
-# ==================== 💰 급여 계산기 ====================
-elif menu == "💰 급여 계산기":
-    from datetime import date as _date_cls
-    import calendar as _cal
-
-    st.title("💰 급여 계산기")
-    st.caption("업무시트 + 버즈필터 장부 순이익을 합산하여 이번 달 적정 급여를 산정합니다.")
-    st.markdown("---")
-
-    # ── 기간 선택 ──────────────────────────────────────────
-    _now = datetime.now()
-    _col1, _col2 = st.columns(2)
-    with _col1:
-        _sal_year = st.selectbox("📅 연도", options=[2024, 2025, 2026, 2027],
-                                  index=[2024,2025,2026,2027].index(_now.year) if _now.year in [2024,2025,2026,2027] else 2,
-                                  key="sal_year")
-    with _col2:
-        _sal_month = st.selectbox("📅 월", options=list(range(1, 13)),
-                                   index=_now.month - 1, key="sal_month")
-
-    # 기간: 선택월 10일 ~ 다음달 9일
-    _sal_start = _date_cls(_sal_year, _sal_month, 10)
-    if _sal_month == 12:
-        _sal_end = _date_cls(_sal_year + 1, 1, 9)
-    else:
-        _sal_end = _date_cls(_sal_year, _sal_month + 1, 9)
-
-    st.info(f"📅 계산 기간: **{_sal_start.strftime('%Y.%m.%d')} ~ {_sal_end.strftime('%Y.%m.%d')}**")
-    st.markdown("---")
-
-    # ── 순이익 계산 버튼 ────────────────────────────────────
-    if st.button("📊 순이익 계산하기", type="primary", key="sal_calc"):
-        _biz_profit = 0.0
-        _buzz_profit = 0.0
-        _biz_rows = []
-        _buzz_rows = []
-
-        # 1) 업무시트 G열(송출일) 기준 P열(수익) 합산
-        with st.spinner("업무시트 불러오는 중..."):
-            _ws = get_salary_sheet("업무시트")
-        if _ws:
-            _ws_data = _ws.get_all_values()
-            for _row in _ws_data[1:]:  # 1행 헤더 스킵
-                if len(_row) <= 15:
-                    continue
-                _g_val = _row[6].strip()   # G열 (인덱스 6)
-                _p_val = _row[15].strip()  # P열 (인덱스 15)
-                if not _g_val or not _p_val:
-                    continue
-                _dt = _salary_parse_date_g(_g_val)
-                _amt = _salary_parse_amount(_p_val)
-                if _dt and _sal_start <= _dt <= _sal_end and _amt != 0:
-                    _biz_profit += _amt
-                    _biz_rows.append({"날짜": str(_dt), "수익": _amt})
-            st.success(f"✅ 업무시트: {len(_biz_rows)}건 / {_biz_profit:,.0f}원")
-        else:
-            st.warning("업무시트 연결 실패 — 탭 이름을 확인해주세요.")
-
-        # 2) 버즈필터 장부 B+C+D 날짜 기준 N열(순이익) 합산
-        with st.spinner("버즈필터 장부 불러오는 중..."):
-            _bz = get_sheet("2. 버즈필터 장부")
-        if _bz:
-            _bz_data = _bz.get_all_values()
-            for _row in _bz_data[2:]:  # 2행 헤더 스킵
-                if len(_row) <= 13:
-                    continue
-                _b_val = _row[1].strip()   # B열 (연도)
-                _c_val = _row[2].strip()   # C열 (월)
-                _d_val = _row[3].strip()   # D열 (일자)
-                _n_val = _row[13].strip()  # N열 (순이익)
-                if not _b_val or not _n_val:
-                    continue
-                _dt2 = _salary_parse_date_bcd(_b_val, _c_val, _d_val)
-                _amt2 = _salary_parse_amount(_n_val)
-                if _dt2 and _sal_start <= _dt2 <= _sal_end and _amt2 != 0:
-                    _buzz_profit += _amt2
-                    _buzz_rows.append({"날짜": str(_dt2), "순이익": _amt2})
-            st.success(f"✅ 버즈필터 장부: {len(_buzz_rows)}건 / {_buzz_profit:,.0f}원")
-        else:
-            st.warning("버즈필터 장부 연결 실패")
-
-        _total_profit = _biz_profit + _buzz_profit
-        st.session_state["sal_biz_profit"] = _biz_profit
-        st.session_state["sal_buzz_profit"] = _buzz_profit
-        st.session_state["sal_total_profit"] = _total_profit
-        st.session_state["sal_biz_rows"] = _biz_rows
-        st.session_state["sal_buzz_rows"] = _buzz_rows
-        st.session_state["sal_period"] = f"{_sal_start.strftime('%Y.%m.%d')} ~ {_sal_end.strftime('%Y.%m.%d')}"
-        st.rerun()
-
-    # ── 결과 표시 (세션에 데이터 있을 때) ──────────────────
-    if "sal_total_profit" in st.session_state:
-        _sp = st.session_state["sal_total_profit"]
-        _sbiz = st.session_state["sal_biz_profit"]
-        _sbuzz = st.session_state["sal_buzz_profit"]
-        _period_label = st.session_state.get("sal_period", "")
-
-        st.markdown("### 📊 순이익 집계 결과")
-        _rc1, _rc2, _rc3 = st.columns(3)
-        with _rc1:
-            st.metric("업무시트 수익", f"{_sbiz:,.0f}원")
-        with _rc2:
-            st.metric("버즈필터 순이익", f"{_sbuzz:,.0f}원")
-        with _rc3:
-            st.metric("**합산 총 순이익**", f"{_sp:,.0f}원",
-                      delta=f"{_period_label}")
-
-        with st.expander("📋 업무시트 상세 내역"):
-            if st.session_state.get("sal_biz_rows"):
-                st.dataframe(st.session_state["sal_biz_rows"], use_container_width=True)
-            else:
-                st.caption("해당 기간 데이터 없음")
-
-        with st.expander("📋 버즈필터 장부 상세 내역"):
-            if st.session_state.get("sal_buzz_rows"):
-                st.dataframe(st.session_state["sal_buzz_rows"], use_container_width=True)
-            else:
-                st.caption("해당 기간 데이터 없음")
-
-        st.markdown("---")
-
-        # ── 통장 잔고 수기 입력 ─────────────────────────────
-        st.markdown("### 🏦 현재 통장 잔고 입력")
-        st.caption("실제 통장 잔고를 직접 입력해주세요.")
-        _bc1, _bc2, _bc3 = st.columns(3)
-        with _bc1:
-            _bank1 = st.number_input("우리은행 (원)", min_value=0, step=10000,
-                                      value=st.session_state.get("sal_bank1", 0),
-                                      key="sal_bank1", format="%d")
-        with _bc2:
-            _bank2 = st.number_input("카카오뱅크 (원)", min_value=0, step=10000,
-                                      value=st.session_state.get("sal_bank2", 0),
-                                      key="sal_bank2", format="%d")
-        with _bc3:
-            _bank3 = st.number_input("IBK기업은행 (원)", min_value=0, step=10000,
-                                      value=st.session_state.get("sal_bank3", 0),
-                                      key="sal_bank3", format="%d")
-
-        _total_bank = _bank1 + _bank2 + _bank3
-        _reserve = 10_000_000  # 안전유보금 1천만원
-        _available = _total_bank - _reserve
-
-        st.markdown("---")
-        st.markdown("### 📋 급여 산정")
-        _gc1, _gc2, _gc3 = st.columns(3)
-        with _gc1:
-            st.metric("총 통장 잔고", f"{_total_bank:,.0f}원")
-        with _gc2:
-            st.metric("안전 유보금", f"-{_reserve:,.0f}원", delta="항상 유지")
-        with _gc3:
-            st.metric("가용 금액", f"{_available:,.0f}원",
-                      delta="양수일 때 급여 가능" if _available > 0 else "⚠️ 잔고 부족")
-
-        if _available <= 0:
-            st.error("⚠️ 안전유보금(1천만원) 제외 시 가용 금액이 없습니다. 급여 지급이 어렵습니다.")
-        else:
-            # 기본 추천 급여: 가용금액의 50% (보수적)
-            _suggested = min(_available * 0.5, _sp * 0.3) if _sp > 0 else _available * 0.3
-            _suggested = max(_suggested, 0)
-            st.success(f"💡 **예상 추천 급여: 약 {_suggested:,.0f}원**")
-            st.caption("※ AI 분석 버튼을 누르면 지출 패턴까지 고려한 정밀 추천을 드립니다.")
-
-        st.markdown("---")
-
-        # ── 추가 재무 정보 (미수금 + 충전잔액) ────────────────
-        st.markdown("### 📡 추가 재무 현황")
-        _ext_col1, _ext_col2 = st.columns(2)
-        with _ext_col1:
-            if st.button("🔄 미수금 / 충전잔액 불러오기", key="sal_ext_load"):
-                _ext_errors = []
-
-                # ── 공용 gspread 클라이언트 생성 ──────────────
-                try:
-                    _scope = ["https://spreadsheets.google.com/feeds",
-                              "https://www.googleapis.com/auth/drive"]
-                    try:
-                        _ec = ServiceAccountCredentials.from_json_keyfile_dict(
-                            json.loads(st.secrets["GOOGLE_CREDENTIALS"]), _scope)
-                    except Exception:
-                        _ec = ServiceAccountCredentials.from_json_keyfile_name(
-                            os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                         'service_account.json'), _scope)
-                    _ext_gs = gspread.authorize(_ec)
-                    _ext_gs_ok = True
-                except Exception as _e:
-                    _ext_gs_ok = False
-                    _ext_errors.append(f"Google 인증 실패: {_e}")
-
-                # ── 언론 매출 통계 J34~J36 스캔 — 미수금 ──────
-                _misu_val = 0
-                try:
-                    _misu_ws = get_salary_sheet("언론 매출 통계")
-                    if _misu_ws:
-                        # J34가 텍스트면 J35, J36까지 순서대로 탐색
-                        _found_cell = None
-                        for _row in [34, 35, 36]:
-                            _raw = _misu_ws.cell(_row, 10).value
-                            _v = _salary_parse_amount(_raw)
-                            if _v != 0:
-                                _misu_val = _v
-                                _found_cell = f"J{_row}"
-                                break
-                        if _misu_val == 0:
-                            # 숫자 없으면 J34 원시값 표시
-                            _raw34 = _misu_ws.cell(34, 10).value
-                            _ext_errors.append(f"언론 매출 통계 J34~J36 금액 없음 (J34 원시값: '{_raw34}')")
-                    else:
-                        _ext_errors.append("언론 매출 통계 탭 연결 실패 — 탭 이름 확인 필요")
-                except Exception as _e:
-                    _ext_errors.append(f"언론 매출 통계 오류: {type(_e).__name__}: {_e!r}")
-
-                # ── 한미마 송출 I3 ─────────────────────────────
-                _hm_val = 0
-                try:
-                    _hm_ws = get_salary_sheet("한미마 송출")
-                    if _hm_ws:
-                        _hm_val = _salary_parse_amount(_hm_ws.cell(3, 9).value)
-                    else:
-                        _ext_errors.append("한미마 송출 탭 연결 실패")
-                except Exception as _e:
-                    _ext_errors.append(f"한미마 송출 오류: {_e}")
-
-                # ── 비지니스코리아 I3 (외부 시트 gid=2058666063) ──
-                _bk_val = 0
-                if _ext_gs_ok:
-                    try:
-                        _bk_sp = _ext_gs.open_by_url(
-                            "https://docs.google.com/spreadsheets/d/"
-                            "1_XesHNaj4MG1_7Vg0EsjokwvcAbrUN--JEmfDMnVidI/")
-                        # gid=2058666063 인 탭 찾기
-                        _bk_ws = None
-                        for _w in _bk_sp.worksheets():
-                            if _w.id == 2058666063:
-                                _bk_ws = _w
-                                break
-                        if _bk_ws is None:
-                            _bk_ws = _bk_sp.get_worksheet(0)  # fallback: 첫 번째 탭
-                        _bk_val = _salary_parse_amount(_bk_ws.cell(3, 9).value)
-                    except Exception as _e:
-                        _ext_errors.append(f"비지니스코리아 오류: {type(_e).__name__}: {_e!r}")
-
-                # ── 이피알몰 I3 (외부 시트 gid=0 → 첫 번째 탭) ──
-                _ep_val = 0
-                if _ext_gs_ok:
-                    try:
-                        _ep_sp = _ext_gs.open_by_url(
-                            "https://docs.google.com/spreadsheets/d/"
-                            "1kZrvcCaIOBFnJpReGmqGC1bVnFAYH1Jx-ESY-dTS54s/")
-                        _ep_ws = _ep_sp.get_worksheet(0)
-                        _ep_val = _salary_parse_amount(_ep_ws.cell(3, 9).value)
-                    except Exception as _e:
-                        _ext_errors.append(f"이피알몰 오류: {type(_e).__name__}: {_e!r}")
-
-                st.session_state["sal_misu"] = _misu_val
-                st.session_state["sal_hm"]   = _hm_val
-                st.session_state["sal_bk"]   = _bk_val
-                st.session_state["sal_ep"]   = _ep_val
-                st.session_state["sal_ext_errors"] = _ext_errors
-                st.rerun()
-
-        if "sal_misu" in st.session_state:
-            _misu_val = st.session_state["sal_misu"]
-            _hm_val  = st.session_state["sal_hm"]
-            _bk_val  = st.session_state["sal_bk"]
-            _ep_val  = st.session_state["sal_ep"]
-            # 에러 메시지 표시
-            for _err in st.session_state.get("sal_ext_errors", []):
-                st.warning(f"⚠️ {_err}")
-
-            _ei1, _ei2 = st.columns(2)
-            with _ei1:
-                st.metric("📥 미수금 (부가세 포함)", f"{_misu_val:,.0f}원",
-                          delta="앞으로 들어올 예정 금액")
-            with _ei2:
-                _charge_alerts = []
-                _hm_color = "🔴" if _hm_val < 200_000 else "🟢"
-                _bk_color = "🔴" if _bk_val < 200_000 else "🟢"
-                _ep_color = "🔴" if _ep_val < 200_000 else "🟢"
-                st.markdown(f"""
-**충전 잔액 현황**
-- {_hm_color} 한미마: {_hm_val:,.0f}원{"  ⚠️ 충전 필요" if _hm_val < 200_000 else ""}
-- {_bk_color} 비지니스코리아: {_bk_val:,.0f}원{"  ⚠️ 충전 필요" if _bk_val < 200_000 else ""}
-- {_ep_color} 이피알몰: {_ep_val:,.0f}원{"  ⚠️ 충전 필요" if _ep_val < 200_000 else ""}
-""")
-                if _hm_val < 200_000:
-                    _charge_alerts.append(f"한미마 충전 예정 (현재 {_hm_val:,.0f}원)")
-                if _bk_val < 200_000:
-                    _charge_alerts.append(f"비지니스코리아 충전 예정 (현재 {_bk_val:,.0f}원)")
-                if _ep_val < 200_000:
-                    _charge_alerts.append(f"이피알몰 충전 예정 (현재 {_ep_val:,.0f}원)")
-
-            st.session_state["sal_charge_alerts"] = _charge_alerts
-        else:
-            _misu_val = 0
-            _hm_val = 0
-            _bk_val = 0
-            _ep_val = 0
-            _charge_alerts = []
-
-        st.markdown("---")
-
-        # ── AI 분석 버튼 ────────────────────────────────────
-        st.markdown("### 🤖 AI 급여 분석")
-        if st.button("✨ Claude AI 분석 시작", type="primary", key="sal_ai_btn"):
-            _expense_summary = ""
-            with st.spinner("종합 정산시트 지출 분석 중..."):
-                _jws = get_salary_sheet("종합 정산시트")
-                if _jws:
-                    _jdata = _jws.get_all_values()
-                    _expense_items = []
-                    for _row in _jdata[3:]:  # 3행부터 데이터
-                        if len(_row) < 5:
-                            continue
-                        _e_year = _row[0].strip()
-                        _e_month = _row[1].strip()
-                        _e_day = _row[2].strip()
-                        _e_name = _row[3].strip()
-                        _e_gubun = _row[4].strip()
-                        _e_name2 = _row[6].strip() if len(_row) > 6 else ""
-                        _e_amt_str = _row[7].strip() if len(_row) > 7 else ""
-                        _e_amt2_str = _row[8].strip() if len(_row) > 8 else ""
-                        _e_amt = _salary_parse_amount(_e_amt_str) or _salary_parse_amount(_e_amt2_str)
-                        if _e_gubun in ["지출", "경비"] and _e_amt > 0 and _e_year:
-                            _expense_items.append(
-                                f"{_e_year} {_e_month} {_e_day} | {_e_name or _e_name2} | {_e_amt:,.0f}원")
-                    if _expense_items:
-                        _expense_summary = "\n".join(_expense_items[-100:])
-                    else:
-                        _expense_summary = "지출 데이터 없음"
-                else:
-                    _expense_summary = "종합 정산시트 연결 실패"
-
-            # 세션에서 충전 알림 가져오기
-            _charge_alerts = st.session_state.get("sal_charge_alerts", [])
-            _misu_val = st.session_state.get("sal_misu", 0)
-            _charge_str = "\n".join(f"- {a}" for a in _charge_alerts) if _charge_alerts else "- 충전 필요 항목 없음"
-
-            with st.spinner("Claude AI 분석 중..."):
-                _client = get_anthropic_client()
-                _today_str = datetime.now().strftime("%Y년 %m월 %d일")
-                _ai_prompt = f"""당신은 알리고미디어의 재무 분석 AI입니다. 아래 데이터를 분석하여 대표님의 이번 달 적정 급여를 추천해주세요.
-
-## 오늘 날짜
-{_today_str}
-
-## 이번 달 데이터 ({_period_label})
-
-### 매출 현황 (이번 기간 발생 수익)
-- 언론·미디어 매출 (업무시트 P열 합계): {_sbiz:,.0f}원
-- 쿠팡 위탁 순이익 (버즈필터 장부 N열 합계): {_sbuzz:,.0f}원
-- **합산 총 매출·수익: {_sp:,.0f}원**
-
-### 미수금 (앞으로 들어올 예정 금액)
-- 부가세 포함 미수금: {_misu_val:,.0f}원
-
-### 통장 잔고 (수기 입력)
-- 우리은행: {_bank1:,.0f}원
-- 카카오뱅크: {_bank2:,.0f}원
-- IBK기업은행: {_bank3:,.0f}원
-- 총 잔고: {_total_bank:,.0f}원
-- 안전유보금(항상 유지): 10,000,000원
-- 가용 금액: {_available:,.0f}원
-
-### 매체 충전 잔액 현황
-- 한미마: {_hm_val:,.0f}원
-- 비지니스코리아: {_bk_val:,.0f}원
-- 이피알몰: {_ep_val:,.0f}원
-
-### 충전 예정 항목 (20만원 이하)
-{_charge_str}
-
-### 최근 지출 내역 (종합 정산시트)
-{_expense_summary}
-
-## 분석 요청
-1. **세금 납부 일정 경고** (최우선): 오늘 날짜 기준으로 앞으로 60일 이내에 납부해야 할 세금이 있으면 반드시 먼저 언급하세요.
-   - 한국 세금 일정 기준: 부가세 예정신고(4월·10월 25일), 부가세 확정신고(1월·7월 25일), 종합소득세(5월 31일), 원천세(매월 10일), 법인세(3월 31일)
-   - 형식: "⚠️ 세금 납부 예정: [다음달/이번달] [세금종류] 납부 기한이 [날짜]입니다. 사전 준비 권장합니다."
-   - 해당 없으면 "이번 기간 60일 내 주요 세금 납부 일정 없음" 으로 표기
-2. **매출 분석**: 언론·미디어 매출과 쿠팡 위탁 수익 각각의 비중과 추이를 평가하고, 매출 구조상 주의할 점이나 개선 방향을 제시하세요.
-3. 지출 패턴 분석 (고정지출/변동지출 파악, 주의할 점)
-4. 충전 예정 항목이 있으면 반드시 언급 (급여 전 처리 권장 여부 포함)
-5. 미수금 고려한 실질 재무 상태 총평
-6. 적정 급여 추천 금액과 근거 (가용금액에서 항상 천만원 유보 후 지급, 세금 납부 예정액 고려)
-7. 다음 달을 위한 재무 조언
-
-간결하고 실용적으로 작성해주세요. 한국어로 답변하세요."""
-
-                _ai_resp = _client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=1800,
-                    messages=[{"role": "user", "content": _ai_prompt}]
-                )
-                _ai_text = _ai_resp.content[0].text
-
-            st.markdown("#### 🤖 AI 분석 결과")
-            st.markdown(_ai_text)
-
-        # 데이터 초기화 버튼
-        st.markdown("---")
-        if st.button("🔄 초기화", key="sal_reset"):
-            for _k in ["sal_total_profit", "sal_biz_profit", "sal_buzz_profit",
-                        "sal_biz_rows", "sal_buzz_rows", "sal_period"]:
-                if _k in st.session_state:
-                    del st.session_state[_k]
-            st.rerun()
