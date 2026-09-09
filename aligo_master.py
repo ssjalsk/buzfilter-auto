@@ -3812,8 +3812,15 @@ elif menu == "📰 언론 업무":
             _sel = st.selectbox("고객 선택", _name_options, key="cust_sel") if _name_options else None
 
             if _sel:
-                _sel_idx = _name_options.index(_sel)
-                _sel_d, _sel_st, _sel_gr = _filtered[_sel_idx]
+                # 고객ID로 직접 탐색 (selectbox 인덱스 불일치 버그 방지)
+                _sel_id = _sel.split("]")[0].replace("[","").strip()
+                _sel_name = _sel.split("] ")[-1].strip() if "] " in _sel else ""
+                _found_cust = [(_d,_st,_gr) for _d,_st,_gr in _filtered
+                               if _d.get("고객ID","") == _sel_id]
+                if not _found_cust:
+                    st.warning("고객 정보를 찾을 수 없습니다. 새로고침 후 다시 선택해주세요.")
+                    st.stop()
+                _sel_d, _sel_st, _sel_gr = _found_cust[0]
 
                 # 통계 요약
                 _s1,_s2,_s3,_s4,_s5 = st.columns(5)
