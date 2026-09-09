@@ -3642,11 +3642,10 @@ elif menu == "📰 언론 업무":
             }]
         )
         _text = _resp.content[0].text.strip()
-        try:
-            _m = re.search(r'\{.*\}', _text, re.DOTALL)
-            return json.loads(_m.group()) if _m else {}
-        except:
-            return {}
+        _m = re.search(r'\{.*\}', _text, re.DOTALL)
+        if not _m:
+            raise ValueError(f"JSON 파싱 실패. Claude 응답: {_text[:200]}")
+        return json.loads(_m.group())
 
     # ── 업무시트 데이터 전체 로드 (탭 공통 사용) ─────
     @st.cache_resource(ttl=120)
@@ -3880,26 +3879,51 @@ elif menu == "📰 언론 업무":
 
                 st.markdown("---")
 
-                # 편집 폼 — key에 고객ID 포함 → 선택 바뀔 때마다 폼 리셋
-                _form_key = f"cust_edit_form_{_sel_d.get('고객ID','0')}"
                 _cid = _sel_d.get('고객ID','0')
+                _cert_ss_key = f"cert_parsed_{_cid}"  # 고객별 cert session_state 키
+
+                # ── 사업자등록증 업로드 (폼 위에) ──────────────
+                st.markdown("#### 📄 사업자등록증 업로드 → 자동 채우기")
+                _cert_file = st.file_uploader("사업자등록증 (JPG/PNG/PDF)", type=["jpg","jpeg","png","pdf"], key=f"cert_upload_{_cid}")
+                if _cert_file:
+                    if st.button("🔍 Claude로 자동 읽기", key=f"cert_parse_btn_{_cid}"):
+                        with st.spinner("사업자등록증 분석 중..."):
+                            try:
+                                _parsed = parse_biz_cert_with_claude(_cert_file.read(), _cert_file.name)
+                            except Exception as _ce:
+                                _parsed = {}
+                                st.error(f"Claude API 오류: {_ce}")
+                        if _parsed:
+                            st.session_state[_cert_ss_key] = _parsed
+                            st.rerun()
+                        else:
+                            st.warning("분석 결과를 읽지 못했습니다. 이미지 품질을 확인하거나 다시 시도하세요.")
+
+                # cert 분석 결과 읽기 (분석 완료 시 폼 value에 자동 적용)
+                _cert = st.session_state.get(_cert_ss_key, {})
+                if _cert:
+                    st.success(f"✅ 사업자등록증 분석 완료 — 아래 폼에 자동 입력됨")
+                    st.json(_cert)
+
+                # ── 편집 폼 (cert 값 우선 반영) ─────────────────
+                # form_key에 cert 유무 포함 → 분석 후 폼 리셋
+                _form_key = f"cust_edit_form_{_cid}_{len(_cert)}"
                 with st.form(_form_key):
-                    _f_name  = st.text_input("담당자명 (업무시트용)", value=_sel_d.get("담당자명",""), key=f"f_name_{_cid}")
-                    _f_biz   = st.text_input("사업자명", value=_sel_d.get("사업자명",""), key=f"f_biz_{_cid}")
-                    _f_rep   = st.text_input("대표자명", value=_sel_d.get("대표자명",""), key=f"f_rep_{_cid}")
-                    _f_aka   = st.text_input("별칭 (쉼표 구분 — 통장 입금자명 등)", value=_sel_d.get("별칭",""), key=f"f_aka_{_cid}", help="홍철수,홍대표,홍팀장")
-                    _f_bno   = st.text_input("사업자번호", value=_sel_d.get("사업자번호",""), key=f"f_bno_{_cid}")
-                    _f_pre   = st.number_input("선충전 잔액 (원)", value=int(float(_sel_d.get("선충전잔액",0) or 0)), step=1000, key=f"f_pre_{_cid}")
+                    _f_name  = st.text_input("담당자명 (업무시트용)", value=_sel_d.get("담당자명",""))
+                    _f_biz   = st.text_input("사업자명",     value=_cert.get("사업자명","")  or _sel_d.get("사업자명",""))
+                    _f_rep   = st.text_input("대표자명",     value=_cert.get("대표자명","")  or _sel_d.get("대표자명",""))
+                    _f_bno   = st.text_input("사업자번호",   value=_cert.get("사업자번호","") or _sel_d.get("사업자번호",""))
+                    _f_aka   = st.text_input("별칭 (쉼표 구분 — 통장 입금자명 등)", value=_sel_d.get("별칭",""), help="홍철수,홍대표,홍팀장")
+                    _f_pre   = st.number_input("선충전 잔액 (원)", value=int(float(_sel_d.get("선충전잔액",0) or 0)), step=1000)
                     _f_submit = st.form_submit_button("💾 저장")
 
                 if _f_submit:
-                    # 해당 고객의 시트 행 번호 찾기
                     _db_ws2 = get_aligo_ws(DB_SHEET_NAME)
                     if _db_ws2:
                         _all_v = _db_ws2.get_all_values()
                         _target_row = None
                         for _ri, _rv in enumerate(_all_v):
-                            if _rv and _rv[0] == _sel_d.get("고객ID",""):
+                            if _rv and _rv[0] == _cid:
                                 _target_row = _ri + 1
                                 break
                         _ok = save_customer(
@@ -3907,23 +3931,15 @@ elif menu == "📰 언론 업무":
                              "별칭":_f_aka,"사업자번호":_f_bno,"선충전잔액":_f_pre},
                             row_idx=_target_row
                         )
-                        if _ok: st.success("✅ 저장 완료!"); get_aligo_ws.clear(); st.rerun()
-                        else: st.error("저장 실패")
-
-                # 사업자등록증 업로드
-                st.markdown("#### 📄 사업자등록증 업로드 → 자동 채우기")
-                _cert_file = st.file_uploader("사업자등록증 (JPG/PNG/PDF)", type=["jpg","jpeg","png","pdf"], key="cert_upload")
-                if _cert_file:
-                    if st.button("🔍 Claude로 자동 읽기", key="cert_parse_btn"):
-                        with st.spinner("사업자등록증 분석 중..."):
-                            _parsed = parse_biz_cert_with_claude(_cert_file.read(), _cert_file.name)
-                        if _parsed:
-                            st.success("✅ 분석 완료! 아래 내용 확인 후 '저장' 버튼을 누르세요.")
-                            st.json(_parsed)
-                            st.session_state["cert_parsed"] = _parsed
-                            st.info("↑ 위 내용이 맞으면, 위 편집 폼에서 해당 항목 채우고 저장하세요.")
+                        if _ok:
+                            # 저장 후 cert 캐시 클리어
+                            if _cert_ss_key in st.session_state:
+                                del st.session_state[_cert_ss_key]
+                            st.success("✅ 저장 완료!")
+                            get_aligo_ws.clear()
+                            st.rerun()
                         else:
-                            st.warning("분석 결과를 읽지 못했습니다. 이미지 품질을 확인하세요.")
+                            st.error("저장 실패")
 
                 # 신규 고객 추가
                 st.markdown("---")
