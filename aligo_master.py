@@ -3493,9 +3493,79 @@ elif menu == "📰 언론 업무":
             _rows.append(_d)
         return _rows
 
+    def refresh_dropdowns():
+        """
+        고객_DB 담당자명 목록 → 업무시트 B열 + 종합 정산시트 F열 드롭다운 즉시 갱신.
+        Streamlit 앱에서 고객 저장 시 자동 호출됨.
+        """
+        try:
+            _ss = get_aligo_ss()
+            if not _ss: return False
+            _db_ws   = _ss.worksheet(DB_SHEET_NAME)
+            _work_ws = _ss.worksheet("업무시트")
+            _sum_ws  = _ss.worksheet("종합 정산시트")
+
+            # 고객_DB에서 담당자명/사업자명 수집
+            _db_vals = _db_ws.get_all_values()
+            if len(_db_vals) < 2: return False
+            _hdr      = _db_vals[0]
+            _name_idx = _hdr.index("담당자명") if "담당자명" in _hdr else -1
+            _biz_idx  = _hdr.index("사업자명") if "사업자명" in _hdr else -1
+            _names = []
+            for _r in _db_vals[1:]:
+                if not any(_r): continue
+                _n = _r[_name_idx].strip() if _name_idx >= 0 and len(_r) > _name_idx else ""
+                _b = _r[_biz_idx].strip()  if _biz_idx  >= 0 and len(_r) > _biz_idx  else ""
+                if _n: _names.append(_n)
+                elif _b: _names.append(_b)
+            _names = sorted(set(_n for _n in _names if _n))
+            if not _names: return False
+
+            # 종합 정산시트 AA열(27번)에 목록 저장 (Apps Script와 동일 위치)
+            _clear_rows = max(len(_names) + 10, 100)
+            _sum_ws.batch_clear([f"AA2:AA{_clear_rows}"])
+            if _sum_ws.cell(1, 27).value != "__고객목록(자동)__":
+                _sum_ws.update_cell(1, 27, "__고객목록(자동)__")
+            _sum_ws.update(f"AA2:AA{len(_names)+1}", [[_n] for _n in _names])
+
+            # Sheets API로 DataValidation 설정
+            _work_id = _work_ws.id
+            _sum_id  = _sum_ws.id
+            _src_ref = f"'종합 정산시트'!$AA$2:$AA${len(_names)+1}"
+            _dv_rule = {
+                "condition": {
+                    "type": "ONE_OF_RANGE",
+                    "values": [{"userEnteredValue": f"={_src_ref}"}]
+                },
+                "inputMessage": "고객_DB에서 선택하세요",
+                "strict": False,
+                "showCustomUi": True
+            }
+            _ss.batch_update({"requests": [
+                # 업무시트 B열 (2행~3000행)
+                {"setDataValidation": {
+                    "range": {"sheetId": _work_id,
+                              "startRowIndex": 1, "endRowIndex": 3000,
+                              "startColumnIndex": 1, "endColumnIndex": 2},
+                    "rule": _dv_rule
+                }},
+                # 종합 정산시트 F열 (4행~2000행)
+                {"setDataValidation": {
+                    "range": {"sheetId": _sum_id,
+                              "startRowIndex": 3, "endRowIndex": 2000,
+                              "startColumnIndex": 5, "endColumnIndex": 6},
+                    "rule": _dv_rule
+                }},
+            ]})
+            return True
+        except Exception as _e:
+            print(f"드롭다운 갱신 오류: {_e}")
+            return False
+
     def save_customer(data: dict, row_idx: int = None):
         """
         고객 저장. row_idx=None이면 새 행 추가, 있으면 해당 행 업데이트.
+        저장 완료 후 업무시트 B열 + 종합 정산시트 F열 드롭다운 자동 갱신.
         data keys: 담당자명, 사업자명, 대표자명, 별칭, 사업자번호, 선충전잔액
         """
         _ws = ensure_db_sheet()
@@ -3531,6 +3601,8 @@ elif menu == "📰 언론 업무":
             ]
             _ws.update(f"A{row_idx}:H{row_idx}", [_new_row])
         get_aligo_ws.clear()
+        # 저장 후 드롭다운 즉시 갱신
+        refresh_dropdowns()
         return True
 
     def migrate_from_workSheet():
@@ -3563,6 +3635,8 @@ elif menu == "📰 언론 업무":
             _next_id += 1
         _ws_db.append_rows(_batch)
         get_aligo_ws.clear()
+        # 마이그레이션 완료 후 드롭다운 갱신
+        refresh_dropdowns()
         return len(_batch), f"{len(_batch)}명 마이그레이션 완료"
 
     def get_customer_stats(name: str, all_work_rows: list):
