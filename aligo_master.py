@@ -3430,7 +3430,7 @@ elif menu == "📰 언론 업무":
     # 📰 언론 업무 — 미수금 / 고객 DB / 입금 처리 / 은행 잔고
     # ─────────────────────────────────────────────
     ALIGO_SHEET_ID = "1OJkg679B09qvW5hAY_vT35KD0dl5435peGszwv55Fzs"  # 원본 업무시트
-    DB_SHEET_NAME  = "고객사 DB관리"   # 고객 DB 저장 시트
+    DB_SHEET_NAME  = "고객_DB"   # 앱 전용 고객 DB 시트 (고객사 DB관리는 기존 매출집계 시트라 별도 분리)
     DB_HEADERS     = ["고객ID","담당자명","사업자명","대표자명","별칭","사업자번호","선충전잔액","등록일"]
 
     # ── 구글시트 연결 ─────────────────────────────
@@ -3567,6 +3567,8 @@ elif menu == "📰 언론 업무":
 
     def get_customer_stats(name: str, all_work_rows: list):
         """업무시트 데이터에서 특정 담당자명 고객 통계 계산"""
+        if not name:  # 빈 이름이면 빈 통계 반환 (오염 방지)
+            return {"건수":0,"매출":0,"원가":0,"순이익":0,"최근방문":"-","평균주기":"-","avg_days":None,"미수건수":0,"미수금":0}
         _rows = [_r for _r in all_work_rows if len(_r) >= 2 and _r[1].strip() == name]
         if not _rows:
             return {"건수":0,"매출":0,"원가":0,"순이익":0,"최근방문":"-","평균주기":"-","미수건수":0,"미수금":0,"avg_days":None}
