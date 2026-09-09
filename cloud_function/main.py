@@ -223,6 +223,16 @@ def match_payment(request):
 
     try:
         gc        = get_gc()
+
+        # amount_k=0이면 종합 정산시트 K열 직접 읽기 (G열 먼저 입력 시 대비)
+        if amount_k == 0:
+            try:
+                settle_ws = gc.open_by_key(SETTLE_SPREADSHEET_ID).worksheet(SETTLE_SHEET)
+                k_raw = settle_ws.cell(int(row), 11).value  # K열=11번
+                amount_k = parse_amount(k_raw or 0)
+            except Exception:
+                pass  # 읽기 실패 시 0으로 유지
+
         customers = load_customer_db(gc)
         matched   = match_customer(payer, customers)
 
