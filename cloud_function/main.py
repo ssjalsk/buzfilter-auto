@@ -76,12 +76,14 @@ def update_work_sheet(gc, advertiser, payer):
         b = norm(row[1] if len(row) > 1 else "")
         if b != adv_n:
             continue
-        e     = row[4].strip() if len(row) > 4 else ""
-        r_val = row[17].strip() if len(row) > 17 else ""
-        if e == "입금확인":
-            updates.append({"range": f"E{i}", "values": [["송출완료"]]})
+        m_val = row[12].strip() if len(row) > 12 else ""   # M열: 링크
+        r_val = row[17].strip() if len(row) > 17 else ""   # R열: 입금자명
+        # R열이 비어있는 행만 처리 (이미 입금 처리된 행 제외)
         if not r_val:
-            updates.append({"range": f"R{i}", "values": [[payer]]})
+            updates.append({"range": f"R{i}", "values": [[payer]]})   # R열: 입금자명
+            updates.append({"range": f"Q{i}", "values": [["입금완료"]]})  # Q열: 입금완료
+            if m_val:  # M열 링크가 있을 때만 E열 송출완료
+                updates.append({"range": f"E{i}", "values": [["송출완료"]]})
     if updates:
         ws.batch_update(updates)
 
