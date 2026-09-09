@@ -3495,7 +3495,7 @@ elif menu == "📰 언론 업무":
 
     def refresh_dropdowns():
         """
-        고객_DB 담당자명 목록 → 업무시트 B열 + 종합 정산시트 F열 드롭다운 즉시 갱신.
+        고객_DB 담당자명 목록 → 업무시트 B열 + 종합 정산시트 F열 + 리뷰 업무시트 B열 드롭다운 즉시 갱신.
         Streamlit 앱에서 고객 저장 시 자동 호출됨.
         """
         try:
@@ -3504,6 +3504,10 @@ elif menu == "📰 언론 업무":
             _db_ws   = _ss.worksheet(DB_SHEET_NAME)
             _work_ws = _ss.worksheet("업무시트")
             _sum_ws  = _ss.worksheet("종합 정산시트")
+            try:
+                _review_ws = _ss.worksheet("리뷰 업무시트")
+            except Exception:
+                _review_ws = None
 
             # 고객_DB에서 담당자명/사업자명 수집
             _db_vals = _db_ws.get_all_values()
@@ -3541,7 +3545,7 @@ elif menu == "📰 언론 업무":
                 "strict": False,
                 "showCustomUi": True
             }
-            _ss.batch_update({"requests": [
+            _requests = [
                 # 업무시트 B열 (2행~3000행)
                 {"setDataValidation": {
                     "range": {"sheetId": _work_id,
@@ -3556,7 +3560,16 @@ elif menu == "📰 언론 업무":
                               "startColumnIndex": 5, "endColumnIndex": 6},
                     "rule": _dv_rule
                 }},
-            ]})
+            ]
+            # 리뷰 업무시트 B열 (2행~3000행) — 시트 존재 시만
+            if _review_ws:
+                _requests.append({"setDataValidation": {
+                    "range": {"sheetId": _review_ws.id,
+                              "startRowIndex": 1, "endRowIndex": 3000,
+                              "startColumnIndex": 1, "endColumnIndex": 2},
+                    "rule": _dv_rule
+                }})
+            _ss.batch_update({"requests": _requests})
             return True
         except Exception as _e:
             print(f"드롭다운 갱신 오류: {_e}")
