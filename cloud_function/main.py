@@ -2,7 +2,8 @@ import os, json, re, functions_framework
 from google.oauth2.service_account import Credentials
 import gspread
 
-SPREADSHEET_ID = "1OJkg679B09qvW5hAY_vT35KD0dl5435peGszwv55Fzs"
+SPREADSHEET_ID        = "1OJkg679B09qvW5hAY_vT35KD0dl5435peGszwv55Fzs"  # 알리고미디어 (고객_DB, 업무시트)
+SETTLE_SPREADSHEET_ID = "1mOV-HmlODZaxPohiVFay9_Rnh31-vhcPXF_b-5-EjB0"  # 알리고미디어의 테스트 시트 (종합 정산시트)
 DB_SHEET       = "고객_DB"
 WORK_SHEET     = "업무시트"
 SETTLE_SHEET   = "종합 정산시트"
@@ -60,7 +61,7 @@ def match_customer(payer, customers):
 
 
 def write_advertiser(gc, row_idx, advertiser):
-    ws = gc.open_by_key(SPREADSHEET_ID).worksheet(SETTLE_SHEET)
+    ws = gc.open_by_key(SETTLE_SPREADSHEET_ID).worksheet(SETTLE_SHEET)
     ws.update_cell(row_idx, 6, advertiser)
 
 
