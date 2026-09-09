@@ -3880,14 +3880,16 @@ elif menu == "📰 언론 업무":
 
                 st.markdown("---")
 
-                # 편집 폼
-                with st.form("cust_edit_form"):
-                    _f_name  = st.text_input("담당자명 (업무시트용)", value=_sel_d.get("담당자명",""), key="f_name")
-                    _f_biz   = st.text_input("사업자명", value=_sel_d.get("사업자명",""), key="f_biz")
-                    _f_rep   = st.text_input("대표자명", value=_sel_d.get("대표자명",""), key="f_rep")
-                    _f_aka   = st.text_input("별칭 (쉼표 구분 — 통장 입금자명 등)", value=_sel_d.get("별칭",""), key="f_aka", help="홍철수,홍대표,홍팀장")
-                    _f_bno   = st.text_input("사업자번호", value=_sel_d.get("사업자번호",""), key="f_bno")
-                    _f_pre   = st.number_input("선충전 잔액 (원)", value=int(float(_sel_d.get("선충전잔액",0) or 0)), step=1000, key="f_pre")
+                # 편집 폼 — key에 고객ID 포함 → 선택 바뀔 때마다 폼 리셋
+                _form_key = f"cust_edit_form_{_sel_d.get('고객ID','0')}"
+                _cid = _sel_d.get('고객ID','0')
+                with st.form(_form_key):
+                    _f_name  = st.text_input("담당자명 (업무시트용)", value=_sel_d.get("담당자명",""), key=f"f_name_{_cid}")
+                    _f_biz   = st.text_input("사업자명", value=_sel_d.get("사업자명",""), key=f"f_biz_{_cid}")
+                    _f_rep   = st.text_input("대표자명", value=_sel_d.get("대표자명",""), key=f"f_rep_{_cid}")
+                    _f_aka   = st.text_input("별칭 (쉼표 구분 — 통장 입금자명 등)", value=_sel_d.get("별칭",""), key=f"f_aka_{_cid}", help="홍철수,홍대표,홍팀장")
+                    _f_bno   = st.text_input("사업자번호", value=_sel_d.get("사업자번호",""), key=f"f_bno_{_cid}")
+                    _f_pre   = st.number_input("선충전 잔액 (원)", value=int(float(_sel_d.get("선충전잔액",0) or 0)), step=1000, key=f"f_pre_{_cid}")
                     _f_submit = st.form_submit_button("💾 저장")
 
                 if _f_submit:
