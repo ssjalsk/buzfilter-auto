@@ -3899,6 +3899,9 @@ elif menu == "📰 언론 업무":
                 st.success("✅ 수정 반영 완료!")
             _name_options = [f"[{_d.get('고객ID','')}] {_d.get('담당자명','')}" for _d,_,_ in _filtered]
             _SEL_PH = "── 고객을 선택하세요 ──"
+            # 저장 완료 후 selectbox 초기화 플래그 처리 (위젯 렌더링 전에 수행해야 에러 없음)
+            if st.session_state.pop('_reset_cust_sel', False):
+                st.session_state['cust_sel'] = _SEL_PH
             _sel_raw = st.selectbox("고객 선택", [_SEL_PH] + _name_options, key="cust_sel") if _name_options else None
             _sel = None if (_sel_raw is None or _sel_raw == _SEL_PH) else _sel_raw
 
@@ -4027,7 +4030,7 @@ elif menu == "📰 언론 업무":
                             if _cert_ss_key in st.session_state:
                                 del st.session_state[_cert_ss_key]
                             st.session_state['_cust_edit_success'] = True
-                            st.session_state['cust_sel'] = _SEL_PH  # selectbox 초기화
+                            st.session_state['_reset_cust_sel'] = True  # 다음 rerun에서 selectbox 초기화
                             get_aligo_ws.clear()
                             st.rerun()
                         else:
