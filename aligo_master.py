@@ -4037,27 +4037,28 @@ elif menu == "📰 언론 업무":
                             st.error("저장 실패")
 
                 # 신규 고객 추가
-                st.markdown("---")
-                st.markdown("#### ➕ 신규 고객 추가")
-                _added_name = st.session_state.pop('_new_cust_added', None)
-                if _added_name:
-                    st.success(f"✅ '{_added_name}' 추가 완료!")
-                with st.form("new_cust_form"):
-                    _n_name = st.text_input("담당자명 (업무시트용)", key="n_name")
-                    _n_biz  = st.text_input("사업자명", key="n_biz")
-                    _n_rep  = st.text_input("대표자명", key="n_rep")
-                    _n_aka  = st.text_input("별칭 (쉼표 구분)", key="n_aka")
-                    _n_bno  = st.text_input("사업자번호", key="n_bno")
-                    _n_sub  = st.form_submit_button("➕ 추가")
-                if _n_sub and _n_name:
-                    _ok2 = save_customer({"담당자명":_n_name,"사업자명":_n_biz,"대표자명":_n_rep,
-                                          "별칭":_n_aka,"사업자번호":_n_bno,"선충전잔액":0})
-                    if _ok2:
-                        st.session_state['_new_cust_added'] = _n_name
-                        get_aligo_ws.clear()
-                        st.rerun()
-                    else:
-                        st.error("추가 실패")
+            # ── 신규 고객 추가 (고객 선택과 무관하게 항상 표시) ──
+            st.markdown("---")
+            st.markdown("#### ➕ 신규 고객 추가")
+            _added_name = st.session_state.pop('_new_cust_added', None)
+            if _added_name:
+                st.success(f"✅ '{_added_name}' 추가 완료!")
+            with st.form("new_cust_form"):
+                _n_name = st.text_input("담당자명 (업무시트용)", key="n_name")
+                _n_biz  = st.text_input("사업자명", key="n_biz")
+                _n_rep  = st.text_input("대표자명", key="n_rep")
+                _n_aka  = st.text_input("별칭 (쉼표 구분)", key="n_aka")
+                _n_bno  = st.text_input("사업자번호", key="n_bno")
+                _n_sub  = st.form_submit_button("➕ 추가")
+            if _n_sub and _n_name:
+                _ok2 = save_customer({"담당자명":_n_name,"사업자명":_n_biz,"대표자명":_n_rep,
+                                      "별칭":_n_aka,"사업자번호":_n_bno,"선충전잔액":0})
+                if _ok2:
+                    st.session_state['_new_cust_added'] = _n_name
+                    get_aligo_ws.clear()
+                    st.rerun()
+                else:
+                    st.error("추가 실패")
 
     # ── 탭3: 입금 처리 ──────────────────────────────────────
     with ln_tab3:
