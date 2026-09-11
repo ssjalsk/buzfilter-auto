@@ -47,10 +47,66 @@ def load_customer_db(gc):
     return result
 
 
-def match_customer(payer, customers):
+def _get_unpaid_amounts(gc, adv_n):
+    """업무시트 + 리뷰 업무시트에서 해당 고객의 미수 청구액 목록 반환"""
+    amounts = []
+    try:
+        ws = gc.open_by_key(SPREADSHEET_ID).worksheet(WORK_SHEET)
+        rows = ws.get_all_values()
+        for row in rows[1:]:
+            if len(row) < 14: continue
+            if norm(row[1]) != adv_n: continue          # B열: 담당자명
+            if str(row[4]).strip() != '입금확인': continue  # E열: 진행상태
+            if len(row) > 17 and str(row[17]).strip(): continue  # R열: 이미 처리
+            n_val = parse_amount(row[13] if len(row) > 13 else "")
+            s_val = parse_amount(row[18] if len(row) > 18 else "")
+            remaining = n_val - s_val
+            if remaining > 0:
+                amounts.append(remaining)
+    except Exception:
+        pass
+    try:
+        rws = gc.open_by_key(SPREADSHEET_ID).worksheet("리뷰 업무시트")
+        rows = rws.get_all_values()
+        for row in rows[1:]:
+            if len(row) < 17: continue
+            if norm(row[1]) != adv_n: continue          # B열: 담당자명
+            t_val = str(row[19]).strip() if len(row) > 19 else ""
+            if t_val == '입금완료': continue             # T열: 이미 완료
+            q_val = parse_amount(row[16] if len(row) > 16 else "")
+            if q_val > 0:
+                amounts.append(q_val)
+    except Exception:
+        pass
+    return amounts
+
+
+def _amount_score(check_amount, amounts):
+    """입금액과 미수 청구액 목록의 일치도 점수(0~100) 반환"""
+    if not amounts or check_amount <= 0:
+        return 0
+    total = sum(amounts)
+    # 개별 청구액 완전 일치
+    if check_amount in amounts:
+        return 100
+    # 합계 완전 일치
+    if check_amount == total:
+        return 90
+    # 개별 10% 이내
+    for amt in amounts:
+        if amt > 0 and abs(check_amount - amt) / amt <= 0.1:
+            return 70
+    # 합계 10% 이내
+    if total > 0 and abs(check_amount - total) / total <= 0.1:
+        return 60
+    return 0
+
+
+def match_customer(payer, customers, amount_k=0, amount_h=0, gc=None):
     pn = norm(payer)
     if not pn:
         return None
+
     # 1차: 완전 일치 (별칭, 담당자명, 사업자명, 대표자명)
     for cust in customers:
         aliases = [a.strip() for a in str(cust.get("별칭", "")).split(",") if a.strip()]
@@ -58,15 +114,39 @@ def match_customer(payer, customers):
         for f in fields:
             if norm(f) == pn:
                 return cust.get("담당자명","") or cust.get("사업자명","")
-    # 2차: 부분 포함
+
+    # 2차: 부분 포함 → 후보 전부 수집
+    candidates = []
     for cust in customers:
         aliases = [a.strip() for a in str(cust.get("별칭", "")).split(",") if a.strip()]
         fields  = aliases + [cust.get("담당자명",""), cust.get("사업자명",""), cust.get("대표자명","")]
         for f in fields:
             fn = norm(f)
             if fn and (fn in pn or pn in fn):
-                return cust.get("담당자명","") or cust.get("사업자명","")
-    return None
+                candidates.append(cust)
+                break
+
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0].get("담당자명","") or candidates[0].get("사업자명","")
+
+    # 3차: 중복 후보 → 업무시트·리뷰 업무시트 입금액 기준 2차 검수
+    if gc and (amount_k > 0 or amount_h > 0):
+        check_amount = amount_h if amount_h > 0 else round(amount_k / 1.1)
+        best_name, best_score = None, -1
+        for cust in candidates:
+            adv_name = cust.get("담당자명","") or cust.get("사업자명","")
+            unpaid   = _get_unpaid_amounts(gc, norm(adv_name))
+            score    = _amount_score(check_amount, unpaid)
+            if score > best_score:
+                best_score = score
+                best_name  = adv_name
+        if best_name and best_score >= 60:
+            return best_name
+
+    # fallback: 첫 번째 후보 반환
+    return candidates[0].get("담당자명","") or candidates[0].get("사업자명","")
 
 
 def write_advertiser(gc, row_idx, advertiser):
@@ -281,7 +361,7 @@ def match_payment(request):
                 pass  # 읽기 실패 시 0으로 유지
 
         customers = load_customer_db(gc)
-        matched   = match_customer(payer, customers)
+        matched   = match_customer(payer, customers, amount_k=amount_k, amount_h=amount_h, gc=gc)
 
         if matched:
             write_advertiser(gc, int(row), matched)
