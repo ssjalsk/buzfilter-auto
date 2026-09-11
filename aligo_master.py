@@ -3874,6 +3874,11 @@ elif menu == "📰 언론 업무":
                             except: pass
                     except: pass
 
+                try:
+                    _prepaid_amt = int(float(str(_d.get('선충전잔액', 0) or 0).replace(',', '').strip() or 0))
+                except (ValueError, TypeError):
+                    _prepaid_amt = 0
+
                 _list_data.append({
                     "등급": _gr,
                     "담당자명": _d.get("담당자명",""),
@@ -3885,7 +3890,7 @@ elif menu == "📰 언론 업무":
                     "최근방문": _last_dt,
                     "방문주기": _st.get("평균주기","-"),
                     "미수": _pay_pattern or _misu_warn or "✅",
-                    "선충전잔액": f"{int(float(_d.get('선충전잔액',0) or 0)):,}원" if _d.get("선충전잔액","0") not in ["","0"] else "-",
+                    "선충전잔액": f"{_prepaid_amt:,}원" if _prepaid_amt > 0 else "-",
                 })
 
             _list_df = pd.DataFrame(_list_data)
