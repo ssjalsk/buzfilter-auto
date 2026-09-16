@@ -154,35 +154,67 @@ def write_advertiser(gc, row_idx, advertiser):
     ws.update_cell(row_idx, 6, advertiser)
 
 
+def _get_prepaid_info(gc, advertiser):
+    """
+    고객_DB에서 선충전잔액 조회.
+    반환: (balance, db_row_1indexed, db_col_1indexed)
+          고객 없거나 컬럼 없으면 (0, -1, -1)
+    """
+    ws = gc.open_by_key(SPREADSHEET_ID).worksheet(DB_SHEET)
+    rows = ws.get_all_values()
+    if len(rows) < 2:
+        return 0, -1, -1
+    headers = rows[0]
+    if "선충전잔액" not in headers:
+        return 0, -1, -1
+    pre_col_idx = headers.index("선충전잔액")
+    adv_n = norm(advertiser)
+    담당자_idx = headers.index("담당자명") if "담당자명" in headers else -1
+    사업자_idx = headers.index("사업자명") if "사업자명" in headers else -1
+    for i, row in enumerate(rows[1:], start=2):
+        담당자 = row[담당자_idx] if 담당자_idx >= 0 and len(row) > 담당자_idx else ""
+        사업자 = row[사업자_idx] if 사업자_idx >= 0 and len(row) > 사업자_idx else ""
+        if norm(담당자) == adv_n or norm(사업자) == adv_n:
+            balance = parse_amount(row[pre_col_idx] if len(row) > pre_col_idx else "")
+            return balance, i, pre_col_idx + 1
+    return 0, -1, -1
+
+
 def add_prepayment(gc, advertiser, amount_n):
     """
     고객_DB 선충전잔액 컬럼에 amount_n(부가세 제외 금액) 추가.
     반환: True=성공, False=컬럼없음 or 고객없음
     """
+    balance, db_row, db_col = _get_prepaid_info(gc, advertiser)
+    if db_row < 0:
+        return False
     ws = gc.open_by_key(SPREADSHEET_ID).worksheet(DB_SHEET)
-    rows = ws.get_all_values()
-    if len(rows) < 2:
-        return False
-    headers = rows[0]
-    if "선충전잔액" not in headers:
-        return False
-
-    pre_col_idx = headers.index("선충전잔액")          # 0-based
-    adv_n = norm(advertiser)
-
-    for i, row in enumerate(rows[1:], start=2):
-        담당자_idx = headers.index("담당자명") if "담당자명" in headers else -1
-        사업자_idx = headers.index("사업자명") if "사업자명" in headers else -1
-        담당자 = (row[담당자_idx] if 담당자_idx >= 0 and len(row) > 담당자_idx else "")
-        사업자 = (row[사업자_idx] if 사업자_idx >= 0 and len(row) > 사업자_idx else "")
-        if norm(담당자) == adv_n or norm(사업자) == adv_n:
-            current = parse_amount(row[pre_col_idx] if len(row) > pre_col_idx else "")
-            ws.update_cell(i, pre_col_idx + 1, current + amount_n)
-            return True
-    return False
+    ws.update_cell(db_row, db_col, balance + amount_n)
+    return True
 
 
-def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0):
+def _build_name_set(advertiser, cust_info):
+    """
+    업무시트 B열 매칭용 norm된 이름 집합 반환.
+    고객_DB의 담당자명, 사업자명, 별칭 전체를 포함해
+    B열에 별칭이 입력된 경우도 올바르게 매칭.
+    """
+    names = set()
+    names.add(norm(advertiser))
+    if cust_info:
+        for field in ["담당자명", "사업자명", "대표자명"]:
+            v = norm(cust_info.get(field, ""))
+            if v:
+                names.add(v)
+        for alias in str(cust_info.get("별칭", "")).split(","):
+            v = norm(alias.strip())
+            if v:
+                names.add(v)
+    names.discard("")
+    return names
+
+
+def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0, cust_info=None):
     """
     업무시트 입금 처리 — N열(부가세 제외) 기준 금액 순차 할당.
 
@@ -191,6 +223,7 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0):
       payer      : 입금자명 (R열에 기록)
       amount_k   : 종합 정산시트 K열 부가세포함 입금액
       amount_h   : 종합 정산시트 H열 미발행 입금액 (부가세 없음, 원금 그대로)
+      cust_info  : 고객_DB 행 dict (담당자명/사업자명/별칭 포함) — 별칭 B열 매칭용
 
     처리 흐름:
       1. remaining_n 계산
@@ -210,7 +243,8 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0):
     if len(all_vals) < 2:
         return {"processed": 0, "prepaid": 0}
 
-    adv_n = norm(advertiser)
+    # B열 매칭: 담당자명, 사업자명, 별칭 모두 포함
+    name_set = _build_name_set(advertiser, cust_info)
 
     # ── 입금 금액 계산 ────────────────────────────────────────────────
     # H열(미발행): 부가세 없이 원금 그대로
@@ -228,7 +262,7 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0):
     if remaining_n > 0:
         for i, row in enumerate(all_vals[1:], start=2):
             b_val = norm(row[1] if len(row) > 1 else "")
-            if b_val != adv_n:
+            if b_val not in name_set:
                 continue
             r_val = row[17].strip() if len(row) > 17 else ""
             if not r_val:
@@ -245,7 +279,7 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0):
     candidates = []
     for i, row in enumerate(all_vals[1:], start=2):
         b_val = norm(row[1] if len(row) > 1 else "")
-        if b_val != adv_n:
+        if b_val not in name_set:
             continue
         r_val = row[17].strip() if len(row) > 17 else ""  # R열: 입금자명
         if r_val:
@@ -266,6 +300,13 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0):
     updates          = []
     processed        = 0
     last_processed_row = None
+
+    # 선충전잔액 조회 (한 번만, 이후 로컬에서 차감 추적)
+    try:
+        prepaid_balance, prepaid_db_row, prepaid_db_col = _get_prepaid_info(gc, advertiser)
+    except Exception:
+        prepaid_balance, prepaid_db_row, prepaid_db_col = 0, -1, -1
+    prepaid_used = 0  # 이번 처리에서 실제 소진된 선충전금액
 
     # 승계잔액을 소비했으므로 해당 행 S열 초기화
     for p in prepaid_rows:
@@ -299,10 +340,29 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0):
             processed += 1
             last_processed_row = c["row"]
         else:
-            # 부분처리: S열에 누적금액 기록
-            new_s = c["s_val"] + remaining_n
-            updates.append({"range": f"S{c['row']}", "values": [[str(new_s)]]})
-            remaining_n = 0
+            # remaining_n 부족 → 선충전잔액 합산으로 완전처리 가능한지 확인
+            if prepaid_balance > 0 and remaining_n + prepaid_balance >= needed:
+                # 선충전 합산으로 완전처리
+                used_from_prepaid = needed - remaining_n
+                updates.append({"range": f"R{c['row']}", "values": [[payer]]})
+                updates.append({"range": f"Q{c['row']}", "values": [["입금완료"]]})
+                updates.append({"range": f"S{c['row']}", "values": [[""]]})
+                if c["m_val"]:
+                    updates.append({"range": f"E{c['row']}", "values": [["송출완료"]]})
+                processed += 1
+                last_processed_row = c["row"]
+                prepaid_used    += used_from_prepaid
+                prepaid_balance -= used_from_prepaid
+                remaining_n      = 0
+            else:
+                # 선충전 합산해도 부족 → 부분처리 (선충전 전부 소진)
+                total_paid = remaining_n + prepaid_balance
+                new_s = c["s_val"] + total_paid
+                updates.append({"range": f"S{c['row']}", "values": [[str(new_s)]]})
+                prepaid_used    += prepaid_balance
+                prepaid_balance  = 0
+                remaining_n      = 0
+            break
 
     # ── 완전처리 후 남은 승계금액 → 마지막 처리된 행 S열에 기록 ────
     if remaining_n > 0 and last_processed_row is not None:
@@ -313,6 +373,14 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0):
     if updates:
         ws.batch_update(updates)
 
+    # ── 선충전잔액 차감 (이번 처리에서 사용된 만큼) ─────────────────
+    if prepaid_used > 0 and prepaid_db_row > 0:
+        try:
+            db_ws = gc.open_by_key(SPREADSHEET_ID).worksheet(DB_SHEET)
+            db_ws.update_cell(prepaid_db_row, prepaid_db_col, prepaid_balance)
+        except Exception:
+            pass  # 차감 실패는 메인 처리에 영향 없도록
+
     # ── 선충전: 처리할 미처리 행 자체가 없는 경우 ───────────────────
     prepaid = 0
     if remaining_n > 0 and last_processed_row is None:
@@ -321,7 +389,7 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0):
         if ok:
             prepaid = remaining_n
 
-    return {"processed": processed, "prepaid": prepaid}
+    return {"processed": processed, "prepaid": prepaid, "prepaid_deducted": prepaid_used}
 
 
 @functions_framework.http
@@ -365,7 +433,13 @@ def match_payment(request):
 
         if matched:
             write_advertiser(gc, int(row), matched)
-            result = update_work_sheet(gc, matched, payer, amount_k, amount_h)
+            # 매칭된 고객_DB 행 정보 전달 → 별칭 포함 B열 매칭을 위해
+            cust_info = next(
+                (c for c in customers
+                 if (c.get("담당자명","") == matched or c.get("사업자명","") == matched)),
+                None
+            )
+            result = update_work_sheet(gc, matched, payer, amount_k, amount_h, cust_info)
             return (json.dumps({
                 "ok":        True,
                 "matched":   matched,
