@@ -32,6 +32,17 @@ def parse_amount(val):
         return 0
 
 
+def _parse_s_val(val):
+    """업무시트 S열 읽기 전용: 숫자만 누적입금액으로 인정.
+    '₩XXX 부족' '초과입금 X' 같은 상태 텍스트는 0 반환 — parse_amount와 구분."""
+    s = str(val).strip()
+    if not s:
+        return 0
+    if "부족" in s or "초과" in s:
+        return 0
+    return parse_amount(s)
+
+
 def load_customer_db(gc):
     ws = gc.open_by_key(SPREADSHEET_ID).worksheet(DB_SHEET)
     rows = ws.get_all_values()
@@ -267,7 +278,7 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0, cust_info=N
             r_val = row[17].strip() if len(row) > 17 else ""
             if not r_val:
                 continue  # 미처리 행 제외 (처리된 행만 확인)
-            s_val = parse_amount(row[18] if len(row) > 18 else "")
+            s_val = _parse_s_val(row[18] if len(row) > 18 else "")
             if s_val > 0:
                 prepaid_rows.append({"row": i, "s_val": s_val})
 
@@ -288,7 +299,7 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0, cust_info=N
         if n_val <= 0:
             continue  # 금액 없는 행 제외
         m_val = row[12].strip() if len(row) > 12 else ""       # M열: 링크
-        s_val = parse_amount(row[18] if len(row) > 18 else "")  # S열: 기존 부분입금 누적
+        s_val = _parse_s_val(row[18] if len(row) > 18 else "")  # S열: 기존 부분입금 누적
         candidates.append({
             "row":   i,
             "n_val": n_val,
