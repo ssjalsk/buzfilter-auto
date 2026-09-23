@@ -308,16 +308,8 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0, cust_info=N
         })
 
     # ── 순차 할당 ────────────────────────────────────────────────────
-    updates          = []
-    processed        = 0
-    last_processed_row = None
-
-    # 선충전잔액 조회 (한 번만, 이후 로컬에서 차감 추적)
-    try:
-        prepaid_balance, prepaid_db_row, prepaid_db_col = _get_prepaid_info(gc, advertiser)
-    except Exception:
-        prepaid_balance, prepaid_db_row, prepaid_db_col = 0, -1, -1
-    prepaid_used = 0  # 이번 처리에서 실제 소진된 선충전금액
+    updates   = []
+    processed = 0
 
     # 승계잔액을 소비했으므로 해당 행 S열 초기화
     for p in prepaid_rows:
@@ -337,70 +329,35 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0, cust_info=N
             if c["m_val"]:
                 updates.append({"range": f"E{c['row']}", "values": [["송출완료"]]})
             processed += 1
-            last_processed_row = c["row"]
             continue
 
         if remaining_n >= needed:
             # 완전처리
             updates.append({"range": f"R{c['row']}", "values": [[payer]]})
             updates.append({"range": f"Q{c['row']}", "values": [["입금완료"]]})
-            updates.append({"range": f"S{c['row']}", "values": [[""]]})  # 임시 초기화 (아래서 덮어씀)
+            updates.append({"range": f"S{c['row']}", "values": [[""]]})
             if c["m_val"]:
                 updates.append({"range": f"E{c['row']}", "values": [["송출완료"]]})
             remaining_n -= needed
             processed += 1
-            last_processed_row = c["row"]
         else:
-            # remaining_n 부족 → 선충전잔액 합산으로 완전처리 가능한지 확인
-            if prepaid_balance > 0 and remaining_n + prepaid_balance >= needed:
-                # 선충전 합산으로 완전처리
-                used_from_prepaid = needed - remaining_n
-                updates.append({"range": f"R{c['row']}", "values": [[payer]]})
-                updates.append({"range": f"Q{c['row']}", "values": [["입금완료"]]})
-                updates.append({"range": f"S{c['row']}", "values": [[""]]})
-                if c["m_val"]:
-                    updates.append({"range": f"E{c['row']}", "values": [["송출완료"]]})
-                processed += 1
-                last_processed_row = c["row"]
-                prepaid_used    += used_from_prepaid
-                prepaid_balance -= used_from_prepaid
-                remaining_n      = 0
-            else:
-                # 선충전 합산해도 부족 → 부분처리 (선충전 전부 소진)
-                total_paid = remaining_n + prepaid_balance
-                new_s = c["s_val"] + total_paid
-                updates.append({"range": f"S{c['row']}", "values": [[str(new_s)]]})
-                prepaid_used    += prepaid_balance
-                prepaid_balance  = 0
-                remaining_n      = 0
+            # 부분처리 — remaining_n만큼 S열에 누적
+            new_s = c["s_val"] + remaining_n
+            updates.append({"range": f"S{c['row']}", "values": [[new_s]]})
+            remaining_n = 0
             break
-
-    # ── 완전처리 후 남은 승계금액 → 마지막 처리된 행 S열에 기록 ────
-    if remaining_n > 0 and last_processed_row is not None:
-        # 이미 S="" 업데이트가 있으면 제거 후 잔액으로 덮어쓰기
-        updates = [u for u in updates if u["range"] != f"S{last_processed_row}"]
-        updates.append({"range": f"S{last_processed_row}", "values": [[str(remaining_n)]]})
 
     if updates:
         ws.batch_update(updates)
 
-    # ── 선충전잔액 차감 (이번 처리에서 사용된 만큼) ─────────────────
-    if prepaid_used > 0 and prepaid_db_row > 0:
-        try:
-            db_ws = gc.open_by_key(SPREADSHEET_ID).worksheet(DB_SHEET)
-            db_ws.update_cell(prepaid_db_row, prepaid_db_col, prepaid_balance)
-        except Exception:
-            pass  # 차감 실패는 메인 처리에 영향 없도록
-
-    # ── 선충전: 처리할 미처리 행 자체가 없는 경우 ───────────────────
+    # ── 완전처리 후 남은 금액(초과입금) → 선충전잔액에 추가 ──────────
     prepaid = 0
-    if remaining_n > 0 and last_processed_row is None:
-        # 미처리 행이 아예 없을 때만 선충전잔액으로 처리
+    if remaining_n > 0:
         ok = add_prepayment(gc, advertiser, remaining_n)
         if ok:
             prepaid = remaining_n
 
-    return {"processed": processed, "prepaid": prepaid, "prepaid_deducted": prepaid_used}
+    return {"processed": processed, "prepaid": prepaid}
 
 
 @functions_framework.http
