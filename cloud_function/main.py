@@ -113,56 +113,125 @@ def _amount_score(check_amount, amounts):
     return 0
 
 
+_CORP = re.compile(r"주식회사|유한회사|유한책임회사|\(주\)|\(유\)|㈜|㈲|（주）|（유）")
+
+
+def norm_corp(s):
+    """회사형태 표기('(주)', '주식회사', '㈜', '유한회사', '(유)')를 뗀 비교용 문자열"""
+    return norm(_CORP.sub("", str(s)))
+
+
+def _same(a, b):
+    """완전 일치: 그대로 비교 또는 회사형태 표기를 뗀 비교 중 하나라도 같으면 일치"""
+    na, nb = norm(a), norm(b)
+    if na and na == nb:
+        return True
+    ca, cb = norm_corp(a), norm_corp(b)
+    return bool(ca) and ca == cb
+
+
+def _overlap(payer, field):
+    """부분 일치 길이 (한쪽이 다른 쪽에 포함될 때 짧은 쪽 길이). 0이면 불일치.
+    ※ 회사형태를 뗀 비교는 부분일치에 쓰지 않음 — '주식회사 미소' → '미소'처럼 짧아져 엉뚱한 고객과 걸리는 것 방지"""
+    p, f = norm(payer), norm(field)
+    if p and f and (f in p or p in f):
+        return min(len(p), len(f))
+    return 0
+
+
+def _fields(cust):
+    """매칭 비교 대상: 별칭(쉼표 구분) + 담당자명 + 사업자명 + 대표자명"""
+    aliases = [a.strip() for a in str(cust.get("별칭", "")).split(",") if a.strip()]
+    return aliases + [cust.get("담당자명",""), cust.get("사업자명",""), cust.get("대표자명","")]
+
+
+def _cust_name(cust):
+    return cust.get("담당자명","") or cust.get("사업자명","")
+
+
+def _pick_by_unpaid(gc, candidates, amount_k, amount_h):
+    """
+    [2026-09-30] 입금자명이 여러 고객과 겹칠 때(예: 같은 사업자의 병원/치과 담당자 분리)
+    업무시트·리뷰 업무시트 미입금 금액으로 '확실히 한 명'을 고를 수 있을 때만 반환.
+    최고 점수(60점 이상) 후보가 딱 한 명이 아니면 None → 수동확인 처리.
+    """
+    if not gc or (amount_k <= 0 and amount_h <= 0):
+        return None
+    check_amount = amount_h if amount_h > 0 else round(amount_k / 1.1)
+    scored = []
+    for cust in candidates:
+        unpaid = _get_unpaid_amounts(gc, norm(_cust_name(cust)))
+        scored.append((_amount_score(check_amount, unpaid), cust))
+    best = max(s for s, _ in scored)
+    top  = [c for s, c in scored if s == best]
+    if best >= 60 and len(top) == 1:
+        return top[0]
+    return None
+
+
 def match_customer(payer, customers, amount_k=0, amount_h=0, gc=None):
+    """
+    반환: {"status": "matched" | "manual" | "none", "cust": 고객dict|None, "candidates": [고객dict]}
+      matched : 한 명으로 확정
+      manual  : 여러 고객과 겹치는데 미입금 금액으로도 구분 불가 → 추측하지 않고 수동확인
+      none    : 일치하는 고객 없음
+    """
     pn = norm(payer)
     if not pn:
-        return None
+        return {"status": "none", "cust": None, "candidates": []}
 
-    # 1차: 완전 일치 (별칭, 담당자명, 사업자명, 대표자명)
+    # 1차: 완전 일치 — 겹치는 고객이 있는지 끝까지 전부 수집 (예전: 위쪽 고객 하나로 즉시 확정)
+    #      '(주)지엠이엠' 과 '지엠이엠' 처럼 회사형태 표기만 다른 것도 같은 이름으로 봄
+    exact = [c for c in customers if any(_same(payer, f) for f in _fields(c))]
+    if len(exact) == 1:
+        return {"status": "matched", "cust": exact[0], "candidates": exact}
+    if len(exact) > 1:
+        pick = _pick_by_unpaid(gc, exact, amount_k, amount_h)
+        if pick:
+            return {"status": "matched", "cust": pick, "candidates": exact}
+        return {"status": "manual", "cust": None, "candidates": exact}
+
+    # 2차: 부분 포함 → 후보 전부 수집 (고객별 가장 길게 겹친 길이)
+    scored = []
     for cust in customers:
-        aliases = [a.strip() for a in str(cust.get("별칭", "")).split(",") if a.strip()]
-        fields  = aliases + [cust.get("담당자명",""), cust.get("사업자명",""), cust.get("대표자명","")]
-        for f in fields:
-            if norm(f) == pn:
-                return cust.get("담당자명","") or cust.get("사업자명","")
+        ov = max((_overlap(payer, f) for f in _fields(cust)), default=0)
+        if ov:
+            scored.append((ov, cust))
 
-    # 2차: 부분 포함 → 후보 전부 수집
-    candidates = []
-    for cust in customers:
-        aliases = [a.strip() for a in str(cust.get("별칭", "")).split(",") if a.strip()]
-        fields  = aliases + [cust.get("담당자명",""), cust.get("사업자명",""), cust.get("대표자명","")]
-        for f in fields:
-            fn = norm(f)
-            if fn and (fn in pn or pn in fn):
-                candidates.append(cust)
-                break
-
-    if not candidates:
-        return None
+    if not scored:
+        return {"status": "none", "cust": None, "candidates": []}
+    # 더 길게 겹친 후보 우선 (예: '애드닷 환불' → '애드'(2자) 보다 '애드닷'(3자))
+    top_ov     = max(ov for ov, _ in scored)
+    candidates = [c for ov, c in scored if ov == top_ov]
     if len(candidates) == 1:
-        return candidates[0].get("담당자명","") or candidates[0].get("사업자명","")
+        return {"status": "matched", "cust": candidates[0], "candidates": candidates}
 
-    # 3차: 중복 후보 → 업무시트·리뷰 업무시트 입금액 기준 2차 검수
-    if gc and (amount_k > 0 or amount_h > 0):
-        check_amount = amount_h if amount_h > 0 else round(amount_k / 1.1)
-        best_name, best_score = None, -1
-        for cust in candidates:
-            adv_name = cust.get("담당자명","") or cust.get("사업자명","")
-            unpaid   = _get_unpaid_amounts(gc, norm(adv_name))
-            score    = _amount_score(check_amount, unpaid)
-            if score > best_score:
-                best_score = score
-                best_name  = adv_name
-        if best_name and best_score >= 60:
-            return best_name
-
-    # fallback: 첫 번째 후보 반환
-    return candidates[0].get("담당자명","") or candidates[0].get("사업자명","")
+    # 3차: 그래도 여러 명 → 미입금 금액 기준 검수 (예전: 구분 안 되면 첫 번째 후보로 추측)
+    pick = _pick_by_unpaid(gc, candidates, amount_k, amount_h)
+    if pick:
+        return {"status": "matched", "cust": pick, "candidates": candidates}
+    return {"status": "manual", "cust": None, "candidates": candidates}
 
 
 def write_advertiser(gc, row_idx, advertiser):
     ws = gc.open_by_key(SETTLE_SPREADSHEET_ID).worksheet(SETTLE_SHEET)
     ws.update_cell(row_idx, 6, advertiser)
+
+
+MANUAL_MARK = "⚠️수동확인"
+
+
+def write_manual_check(gc, row_idx, names):
+    """
+    여러 고객과 겹쳐 자동 판단 불가 → F열에 수동확인 표시 + 메모로 후보 안내.
+    업무시트 입금처리·선충전 적립은 하지 않음.
+    """
+    ws = gc.open_by_key(SETTLE_SPREADSHEET_ID).worksheet(SETTLE_SHEET)
+    ws.update_cell(row_idx, 6, MANUAL_MARK)
+    ws.update_note(f"F{row_idx}",
+                   "입금자명이 여러 고객과 겹쳐 자동으로 판단하지 못했습니다.\n"
+                   "후보: " + " / ".join(names) + "\n"
+                   "업무시트 미입금 건 확인 후 F열을 지우고 올바른 광고주를 선택해 주세요.")
 
 
 def _get_prepaid_info(gc, advertiser):
@@ -397,16 +466,20 @@ def match_payment(request):
                 pass  # 읽기 실패 시 0으로 유지
 
         customers = load_customer_db(gc)
-        matched   = match_customer(payer, customers, amount_k=amount_k, amount_h=amount_h, gc=gc)
+        res       = match_customer(payer, customers, amount_k=amount_k, amount_h=amount_h, gc=gc)
 
-        if matched:
+        if res["status"] == "manual":
+            names = [_cust_name(c) for c in res["candidates"]]
+            write_manual_check(gc, int(row), names)
+            return (json.dumps({"ok": True, "matched": None, "manual": True, "candidates": names,
+                                "msg": f"'{payer}' 여러 고객과 겹침 → 수동확인"}), 200,
+                    {"Content-Type": "application/json"})
+
+        if res["status"] == "matched":
+            # 매칭된 고객_DB 행을 그대로 전달 (이름으로 다시 찾지 않음 → 사업자명 겹쳐도 정확)
+            cust_info = res["cust"]
+            matched   = _cust_name(cust_info)
             write_advertiser(gc, int(row), matched)
-            # 매칭된 고객_DB 행 정보 전달 → 별칭 포함 B열 매칭을 위해
-            cust_info = next(
-                (c for c in customers
-                 if (c.get("담당자명","") == matched or c.get("사업자명","") == matched)),
-                None
-            )
             result = update_work_sheet(gc, matched, payer, amount_k, amount_h, cust_info)
             return (json.dumps({
                 "ok":        True,
