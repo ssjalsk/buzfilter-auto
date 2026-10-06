@@ -219,6 +219,78 @@ def write_advertiser(gc, row_idx, advertiser):
 
 
 MANUAL_MARK = "⚠️수동확인"
+RECORD_COL  = 29   # 종합 정산시트 AC열: 자동매칭이 실제로 처리한 금액(부가세 제외) 기록 — 금액 변경 시 차액 계산 기준
+
+
+def net_amount(amount_k, amount_h):
+    """입금액(부가세 제외): H열(미발행) 우선, 없으면 K열/1.1"""
+    if amount_h > 0:
+        return amount_h
+    if amount_k > 0:
+        return round(amount_k / 1.1)
+    return 0
+
+
+def write_record(gc, row_idx, amount_n):
+    ws = gc.open_by_key(SETTLE_SPREADSHEET_ID).worksheet(SETTLE_SHEET)
+    ws.update_cell(row_idx, RECORD_COL, amount_n)
+
+
+def mark_amount_cell(gc, row_idx, note, warn):
+    """K열(입금액)에 메모 + 경고 시 연한 빨간 배경 (처리 결과를 시트에서 바로 확인)"""
+    ws = gc.open_by_key(SETTLE_SPREADSHEET_ID).worksheet(SETTLE_SHEET)
+    ws.update_note(f"K{row_idx}", note)
+    color = {"red": 1.0, "green": 0.85, "blue": 0.85} if warn else {"red": 1.0, "green": 1.0, "blue": 1.0}
+    ws.format(f"K{row_idx}", {"backgroundColor": color})
+
+
+def process_amount_change(gc, row_idx, payer, amount_k, amount_h):
+    """
+    [2026-10-06] 이미 자동매칭된 행의 금액(H/K)이 수정됐을 때.
+      - AC열 기록 없음 → 아무것도 안 함 (기능 도입 전 입력 / 광고주 수동선택 행 — 기존 동작 유지)
+      - 늘어남 → 늘어난 차액만 같은 고객 대상으로 업무시트 재매칭 (완료/승계/선충전)
+      - 줄어듦 → 자동 되돌리기 안 함, K열 메모·빨간 표시로 수동확인 요청
+    """
+    ws  = gc.open_by_key(SETTLE_SPREADSHEET_ID).worksheet(SETTLE_SHEET)
+    adv = str(ws.cell(row_idx, 6).value or "").strip()
+    rec = str(ws.cell(row_idx, RECORD_COL).value or "").strip()
+    if not adv or adv.startswith("⚠️") or not rec:
+        return {"action": "skip"}
+
+    recorded = parse_amount(rec)
+    new_n    = net_amount(amount_k, amount_h)
+    diff     = new_n - recorded
+    if diff == 0:
+        return {"action": "same"}
+
+    if diff < 0:
+        mark_amount_cell(gc, row_idx,
+                         f"⚠️ 금액 감소 — 자동 처리하지 않았습니다.\n"
+                         f"처리된 금액(부가세 제외): {recorded:,}원 → 바뀐 금액: {new_n:,}원 (차액 {diff:,}원)\n"
+                         f"업무시트 입금완료 건/선충전잔액을 확인해 수동으로 조정해 주세요.", warn=True)
+        return {"action": "decrease", "diff": diff}
+
+    customers = load_customer_db(gc)
+    cust_info = next((c for c in customers
+                      if c.get("담당자명","") == adv or c.get("사업자명","") == adv), None)
+    if not cust_info:
+        mark_amount_cell(gc, row_idx,
+                         f"⚠️ 금액 증가 {diff:,}원 — 광고주 '{adv}' 를 고객_DB에서 찾지 못해 처리하지 않았습니다.", warn=True)
+        return {"action": "no_customer", "diff": diff}
+
+    # 기록을 먼저 갱신 → 처리 중 오류가 나도 차액이 두 번 들어가지 않음 (오류 시 메모로 수동확인 안내)
+    write_record(gc, row_idx, new_n)
+    try:
+        result = update_work_sheet(gc, adv, payer, 0, diff, cust_info)   # amount_h 자리 = 부가세 제외 차액
+    except Exception as e:
+        mark_amount_cell(gc, row_idx,
+                         f"⚠️ 금액 증가 {diff:,}원 추가 처리 중 오류 — 수동확인 필요\n({e})", warn=True)
+        raise
+    mark_amount_cell(gc, row_idx,
+                     f"✅ 금액 증가 반영: {recorded:,}원 → {new_n:,}원 (부가세 제외)\n"
+                     f"차액 {diff:,}원 추가 처리 — 완료 {result['processed']}건, 선충전 {result['prepaid']:,}원",
+                     warn=False)
+    return {"action": "increase", "diff": diff, **result}
 
 
 def write_manual_check(gc, row_idx, names):
@@ -454,6 +526,12 @@ def match_payment(request):
     try:
         gc = get_gc()
 
+        # [2026-10-06] 이미 매칭된 행의 금액 수정 → 차액 처리 모드
+        if data.get("mode") == "delta":
+            res = process_amount_change(gc, int(row), payer, amount_k, amount_h)
+            return (json.dumps({"ok": True, "mode": "delta", **res}), 200,
+                    {"Content-Type": "application/json"})
+
         # amount_k=0, amount_h=0이면 종합 정산시트에서 직접 읽기 (G열 먼저 입력 시 대비)
         if amount_k == 0 and amount_h == 0:
             try:
@@ -481,6 +559,7 @@ def match_payment(request):
             matched   = _cust_name(cust_info)
             write_advertiser(gc, int(row), matched)
             result = update_work_sheet(gc, matched, payer, amount_k, amount_h, cust_info)
+            write_record(gc, int(row), net_amount(amount_k, amount_h))   # 처리 금액 기록 (금액 변경 시 차액 기준)
             return (json.dumps({
                 "ok":        True,
                 "matched":   matched,
