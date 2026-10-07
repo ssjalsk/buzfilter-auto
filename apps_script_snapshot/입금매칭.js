@@ -67,10 +67,16 @@ function callMatchPayment_(rowIndex, payer, amountK, amountH, mode) {
  * (단순 onEdit은 UrlFetchApp 불가 → 설치형 트리거 필요)
  *
  * [처리 조건] 입력 순서 무관 — 아래 조건 모두 충족 시 실행:
- *   1. 종합 정산시트의 G(7), H(8), K(11)열 중 하나 편집
+ *   1. 종합 정산시트의 E(5), G(7), H(8), K(11)열 중 하나 편집
  *   2. E열(구분) = '매출'
  *   3. G열(입금자명) 비어있지 않음
  *   4. H열(미발행) 또는 K열(부가세포함) 중 하나 이상 값 있음
+ *   → 매출·입금자명·금액 3가지를 어떤 순서로 입력해도, 마지막 칸 입력 순간 1회 실행
+ *
+ * [2026-10-07] E열 추가: 입금자명·금액을 먼저 쓰고 '매출'을 마지막에 고르는 경우 대응.
+ *   E열 편집은 아래일 때만 실행 (과거 행 재처리 방지):
+ *   - E열 한 칸만 편집 (여러 칸 붙여넣기·끌어 채우기 제외)
+ *   - 빈칸 → '매출' 로 처음 입력 (이미 '매출'인 행을 다시 고르는 경우 제외)
  */
 function onSettleEdit(e) {
   if (!e) return;
@@ -81,8 +87,16 @@ function onSettleEdit(e) {
   const col = e.range.getColumn();
   if (row < 4) return;
 
-  // G(7), H(8), K(11)열 편집만 처리
-  if (col !== 7 && col !== 8 && col !== 11) return;
+  // E(5), G(7), H(8), K(11)열 편집만 처리
+  if (col !== 5 && col !== 7 && col !== 8 && col !== 11) return;
+
+  // [2026-10-07] E열 편집: 한 칸 + 빈칸→'매출' 첫 입력일 때만
+  if (col === 5) {
+    if (e.range.getNumRows() !== 1 || e.range.getNumColumns() !== 1) return;
+    const newVal = String((e.value !== undefined && e.value !== null) ? e.value : sheet.getRange(row, 5).getValue()).trim();
+    const oldVal = String((e.oldValue !== undefined && e.oldValue !== null) ? e.oldValue : '').trim();
+    if (newVal !== '매출' || oldVal !== '') return;
+  }
 
   // E열(5) = '매출'인 행만 처리
   const eVal = String(sheet.getRange(row, 5).getValue() || '').trim();
