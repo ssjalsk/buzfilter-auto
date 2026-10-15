@@ -45,6 +45,9 @@ const REVIEW_CONF = {
   }
 };
 
+/** 리뷰 매출(Q) 입력 시 선충전 자동 차감 — 선충전잔액 정리 전까지 false (REVIEW_Trigger 참고) */
+const REVIEW_PREPAID_ON_ENTRY = false;
+
 /* ───── 유틸 ──────────────────────────────────────────────────── */
 function _rv_(v){ return (v===null||v===undefined)?'':String(v).trim(); }
 
@@ -230,9 +233,9 @@ function REVIEW_Trigger(e){
   }
 
   // ── [2026-10-15] 리뷰 업무시트: B(고객명)·Q(매출) 입력 → 선충전 잔액 자동 차감 ──
-  // Q열은 숫자를 직접 입력하는 칸(수식 아님)이라 onEdit 발동됨. 예전 '입금확인' 상태 조건은
-  // 리뷰 시트에 그 상태가 없어 작동하지 않았음 → 금액이 정해지는 시점(Q 입력)으로 변경
-  if(sheetName === REVIEW_CONF.WORK_SHEET && (col === 2 || col === 17) && e.range.getNumColumns() === 1){
+  // ⚠️ 현재 꺼둠(REVIEW_PREPAID_ON_ENTRY=false): 리뷰 고객 선충전잔액에 예전 이중 적립분(리뷰 입금이 선충전에도 쌓임)이
+  //    남아 있어, 켜면 아직 돈 안 낸 리뷰 건이 그 잔액으로 입금완료 처리될 수 있음. 선충전 정리 후 true 로 켤 것.
+  if(REVIEW_PREPAID_ON_ENTRY && sheetName === REVIEW_CONF.WORK_SHEET && (col === 2 || col === 17) && e.range.getNumColumns() === 1){
     if(row >= REVIEW_CONF.DATA_ROW){
       const nRows = e.range.getNumRows();
       for(let r = row; r < row + nRows; r++) _checkPrepaidCredit_Review_(sheet, r);
