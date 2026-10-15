@@ -316,10 +316,12 @@ function _findPrepaidCustomer_(db, customer){
   return hits.length===1?pick(hits[0]):null;
 }
 
-/** 정산 처리 직렬화 (입금 자동매칭 onSettleEdit 과 같은 스크립트 잠금 → 선충전잔액 동시 수정으로 금액 날아가는 것 방지) */
+/** 정산 처리 직렬화 (입금 자동매칭 onSettleEdit 과 같은 스크립트 잠금 → 선충전잔액 동시 수정으로 금액 날아가는 것 방지)
+ *  ※ 1초만 시도하고 못 잡으면 그냥 진행. E·M열 편집 때 송출리스트 동기화(HYB_Trigger)가 같은 잠금을 오래 잡고 있어
+ *    길게 기다리면 단순 onEdit 30초 제한에 걸려 선충전 처리가 통째로 끊김 (2026-10-15 안수현 3979행) */
 function _withSettleLock_(fn){
   let lock=null;
-  try{ lock=LockService.getScriptLock(); if(!lock.tryLock(20000)) lock=null; }catch(e){ lock=null; }
+  try{ lock=LockService.getScriptLock(); if(!lock.tryLock(1000)) lock=null; }catch(e){ lock=null; }
   try{ return fn(); }
   finally{ if(lock){ try{ lock.releaseLock(); }catch(e){} } }
 }
