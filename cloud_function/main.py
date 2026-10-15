@@ -1,4 +1,4 @@
-import os, json, re, functions_framework
+import os, json, re, time, functions_framework
 from google.oauth2.service_account import Credentials
 import gspread
 
@@ -286,6 +286,13 @@ def process_amount_change(gc, row_idx, payer, amount_k, amount_h):
         mark_amount_cell(gc, row_idx,
                          f"⚠️ 금액 증가 {diff:,}원 추가 처리 중 오류 — 수동확인 필요\n({e})", warn=True)
         raise
+    if result.get("price_pending"):
+        # [2026-10-15] 단가표 로딩 실패 → 아무것도 처리 안 됨. 기록을 되돌려 K열 재입력 시 다시 처리되게 함
+        write_record(gc, row_idx, recorded)
+        mark_amount_cell(gc, row_idx,
+                         f"⚠️ 금액 증가 {diff:,}원 — 단가표(업무시트 N열 금액)를 불러오지 못해 처리하지 않았습니다.\n"
+                         f"업무시트 {result['price_pending']}행 금액이 보이는지 확인 후 K열 금액을 다시 입력해 주세요.", warn=True)
+        return {"action": "price_pending", "diff": diff, "rows": result["price_pending"]}
     mark_amount_cell(gc, row_idx,
                      f"✅ 금액 증가 반영: {recorded:,}원 → {new_n:,}원 (부가세 제외)\n"
                      f"차액 {diff:,}원 추가 처리 — 완료 {result['processed']}건, 선충전 {result['prepaid']:,}원",
@@ -304,6 +311,20 @@ def write_manual_check(gc, row_idx, names):
                    "입금자명이 여러 고객과 겹쳐 자동으로 판단하지 못했습니다.\n"
                    "후보: " + " / ".join(names) + "\n"
                    "업무시트 미입금 건 확인 후 F열을 지우고 올바른 광고주를 선택해 주세요.")
+
+
+def write_price_pending(gc, row_idx, advertiser, work_rows):
+    """
+    [2026-10-15] 고객은 찾았지만 업무시트 금액(N열, 외부 단가표 수식)이 안 불러와져 배정 불가.
+    F열 수동확인 표시 + 메모. 업무시트 입금처리·선충전 적립은 하지 않음.
+    F열을 지우고 K(또는 H)열 금액을 다시 입력하면 자동매칭이 다시 실행됨.
+    """
+    ws = gc.open_by_key(SETTLE_SPREADSHEET_ID).worksheet(SETTLE_SHEET)
+    ws.update_cell(row_idx, 6, MANUAL_MARK)
+    ws.update_note(f"F{row_idx}",
+                   f"고객: {advertiser}\n"
+                   f"업무시트 금액(N열)을 단가표에서 불러오지 못해 입금 처리를 멈췄습니다. (업무시트 {', '.join(map(str, work_rows))}행)\n"
+                   "업무시트에 금액이 보이면 → 이 F열을 지우고 K(또는 H)열 금액을 다시 입력해 주세요. 자동으로 다시 처리됩니다.")
 
 
 def _get_prepaid_info(gc, advertiser):
@@ -366,6 +387,39 @@ def _build_name_set(advertiser, cust_info):
     return names
 
 
+PRICE_SHEET = "price_mirror"   # 업무시트 N열 단가 수식이 참조하는 탭 (외부 단가표 IMPORTRANGE)
+
+
+def _price_pending_rows(all_vals, name_set):
+    """이 고객의 미입금 행 중 '매체사(I)·소재(K)는 있는데 금액(N)만 빈' 행 번호.
+    단가표(IMPORTRANGE) 새로고침 순간에는 N열 수식이 전부 빈칸으로 읽힘 → 그대로 두면 이 행을 건너뛰고
+    뒤쪽 행이나 선충전에 잘못 배정됨 (2026-10-08 플랜원컴퍼니 3920행)."""
+    rows = []
+    for i, row in enumerate(all_vals[1:], start=2):
+        if norm(row[1] if len(row) > 1 else "") not in name_set:
+            continue
+        if (row[17].strip() if len(row) > 17 else ""):          # R열 입금자 있음 = 처리된 행
+            continue
+        if (row[4].strip() if len(row) > 4 else "") == "반려":
+            continue
+        n = row[13].strip() if len(row) > 13 else ""
+        i_val = row[8].strip() if len(row) > 8 else ""
+        k_val = row[10].strip() if len(row) > 10 else ""
+        if not n and i_val and k_val:
+            rows.append(i)
+    return rows
+
+
+def _price_sheet_loaded(gc):
+    """price_mirror(외부 단가표 불러오기)가 정상 표시 중인지: A4='매체사' + 아래 매체 목록 존재"""
+    try:
+        vals = gc.open_by_key(SPREADSHEET_ID).worksheet(PRICE_SHEET).get("A4:A8")
+        col = [r[0].strip() if r else "" for r in vals]
+        return len(col) >= 3 and col[0] == "매체사" and sum(1 for c in col[1:] if c) >= 2
+    except Exception:
+        return False
+
+
 def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0, cust_info=None):
     """
     업무시트 입금 처리 — N열(부가세 제외) 기준 금액 순차 할당.
@@ -397,6 +451,23 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0, cust_info=N
 
     # B열 매칭: 담당자명, 사업자명, 별칭 모두 포함
     name_set = _build_name_set(advertiser, cust_info)
+
+    # ── [2026-10-15] 단가표 로딩 중 금액 빈칸 대비 ──────────────────
+    # 금액만 빈 미입금 행이 있으면 몇 초 뒤 다시 읽음.
+    #  - 다시 읽어서 채워지면 → 정상 진행
+    #  - 단가표는 정상인데 여전히 빈칸 → 단가표에 없는 매체(원래 빈칸) → 예전처럼 건너뛰고 진행
+    #  - 끝까지 단가표가 안 불러와짐 → 아무것도 쓰지 않고 price_pending 반환 (호출부에서 수동확인 표시)
+    pending = _price_pending_rows(all_vals, name_set)
+    for attempt in range(3):
+        if not pending:
+            break
+        if attempt >= 1 and _price_sheet_loaded(gc):
+            break
+        time.sleep(3)
+        all_vals = ws.get_all_values()
+        pending  = _price_pending_rows(all_vals, name_set)
+    if pending and not _price_sheet_loaded(gc):
+        return {"processed": 0, "prepaid": 0, "price_pending": pending}
 
     # ── 입금 금액 계산 ────────────────────────────────────────────────
     # H열(미발행): 부가세 없이 원금 그대로
@@ -559,6 +630,12 @@ def match_payment(request):
             matched   = _cust_name(cust_info)
             write_advertiser(gc, int(row), matched)
             result = update_work_sheet(gc, matched, payer, amount_k, amount_h, cust_info)
+            if result.get("price_pending"):
+                # [2026-10-15] 단가표가 안 불러와져 금액을 모름 → 업무시트·선충전 아무것도 안 건드림
+                write_price_pending(gc, int(row), matched, result["price_pending"])
+                return (json.dumps({"ok": True, "matched": None, "manual": True,
+                                    "msg": f"'{payer}' → {matched}: 단가표 로딩 실패로 수동확인 (업무시트 {result['price_pending']}행)"}),
+                        200, {"Content-Type": "application/json"})
             write_record(gc, int(row), net_amount(amount_k, amount_h))   # 처리 금액 기록 (금액 변경 시 차액 기준)
             return (json.dumps({
                 "ok":        True,
