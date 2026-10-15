@@ -7,6 +7,7 @@ SETTLE_SPREADSHEET_ID = "1mOV-HmlODZaxPohiVFay9_Rnh31-vhcPXF_b-5-EjB0"  # 동일
 DB_SHEET       = "고객_DB"
 WORK_SHEET     = "업무시트"
 SETTLE_SHEET   = "종합 정산시트"
+REVIEW_SHEET   = "리뷰 업무시트"
 SCOPES = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
 
@@ -40,7 +41,16 @@ def _parse_s_val(val):
         return 0
     if "부족" in s or "초과" in s:
         return 0
+    # [2026-10-15] 숫자·쉼표·₩·원만 있을 때만 금액. 담당자 메모('6/8 10건 접수…' → 681,020원으로 읽히던 문제)는 0
+    if not re.fullmatch(r"[₩￦\s\d,.원\-]+", s):
+        return 0
     return parse_amount(s)
+
+
+def _date_key(val):
+    """의뢰일 '2026. 9. 7' / '2026-09-07' → (2026, 9, 7). 없거나 못 읽으면 맨 뒤로"""
+    m = re.match(r"\s*(\d{4})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})", str(val or ""))
+    return (int(m[1]), int(m[2]), int(m[3])) if m else (9999, 12, 31)
 
 
 def load_customer_db(gc):
@@ -70,7 +80,7 @@ def _get_unpaid_amounts(gc, adv_n):
             if str(row[4]).strip() != '입금확인': continue  # E열: 진행상태
             if len(row) > 17 and str(row[17]).strip(): continue  # R열: 이미 처리
             n_val = parse_amount(row[13] if len(row) > 13 else "")
-            s_val = parse_amount(row[18] if len(row) > 18 else "")
+            s_val = _parse_s_val(row[18] if len(row) > 18 else "")
             remaining = n_val - s_val
             if remaining > 0:
                 amounts.append(remaining)
@@ -85,8 +95,9 @@ def _get_unpaid_amounts(gc, adv_n):
             t_val = str(row[19]).strip() if len(row) > 19 else ""
             if t_val == '입금완료': continue             # T열: 이미 완료
             q_val = parse_amount(row[16] if len(row) > 16 else "")
-            if q_val > 0:
-                amounts.append(q_val)
+            w_val = _parse_s_val(row[22] if len(row) > 22 else "")   # W열: 부분입금 누적
+            if q_val - w_val > 0:
+                amounts.append(q_val - w_val)
     except Exception:
         pass
     return amounts
@@ -400,6 +411,8 @@ def _price_pending_rows(all_vals, name_set):
             continue
         if (row[17].strip() if len(row) > 17 else ""):          # R열 입금자 있음 = 처리된 행
             continue
+        if (row[16].strip() if len(row) > 16 else "") == "입금완료":
+            continue
         if (row[4].strip() if len(row) > 4 else "") == "반려":
             continue
         n = row[13].strip() if len(row) > 13 else ""
@@ -422,34 +435,38 @@ def _price_sheet_loaded(gc):
 
 def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0, cust_info=None):
     """
-    업무시트 입금 처리 — N열(부가세 제외) 기준 금액 순차 할당.
+    입금 처리 — 업무시트 + 리뷰 업무시트 미입금 건에 의뢰일 오래된 순(FIFO)으로 배정.
 
     파라미터:
       advertiser : 매칭된 광고주명 (고객_DB 담당자명/사업자명)
-      payer      : 입금자명 (R열에 기록)
+      payer      : 입금자명 (R열 / 리뷰 U열에 기록)
       amount_k   : 종합 정산시트 K열 부가세포함 입금액
       amount_h   : 종합 정산시트 H열 미발행 입금액 (부가세 없음, 원금 그대로)
       cust_info  : 고객_DB 행 dict (담당자명/사업자명/별칭 포함) — 별칭 B열 매칭용
 
     처리 흐름:
-      1. remaining_n 계산
-         - amount_h > 0 → remaining_n = amount_h (부가세 없음)
-         - amount_k > 0 → remaining_n = round(amount_k / 1.1) (부가세 제외)
-      2. 처리된 행(R열 채워짐) 중 S열 잔액 → remaining_n에 합산, 해당 S열 초기화
-      3. 미처리 행(R열 비어있음) 위→아래 순서로 FIFO 할당
-         - remaining_n >= needed → 완전처리 (Q=입금완료, R=입금자명, M있으면 E=송출완료)
-         - remaining_n < needed  → 부분처리 (S열에 누적값 기록, 중단)
-      4. 완전처리 후 remaining_n 남으면 → 마지막 처리된 행 S열에 승계금액 기록
-      5. 처리할 미처리 행 자체가 없으면 → 고객_DB 선충전잔액에 추가
+      1. 입금액(부가세 제외) = H열 그대로 / K열 ÷ 1.1
+      2. 미입금 건 수집
+         - 업무시트: B 일치, R(입금자) 빈칸, Q≠입금완료, E≠반려, N>0 / 기존 부분입금 = S열(숫자만)
+         - 리뷰 업무시트: B 일치, T≠입금완료, Q(매출)>0 / 기존 부분입금 = W열(숫자만)
+      3. 의뢰일 오래된 순으로 배정
+         - 남은 입금 >= 필요액 → 완납 (업무: Q=입금완료·R=입금자·S 비움·링크 있으면 E=송출완료 / 리뷰: T=입금완료·U=입금자·W 비움)
+         - 남은 입금 <  필요액 → 부분입금 (S 또는 W열에 누적 금액 숫자로 기록, 입금자명은 쓰지 않음) 후 중단
+      4. 다 배정하고 남은 금액 → 고객_DB 선충전잔액에 추가
 
-    반환: {"processed": 완전처리행수, "prepaid": 선충전추가금액}
+    [2026-10-15 정산 전체 점검]
+      - S열 메모(글자)를 금액으로 읽지 않음 (_parse_s_val)
+      - 이미 입금완료(Q)인데 R이 빈 행, 반려 행에는 배정하지 않음
+      - 리뷰 업무시트 포함 (예전 정산 방식 APPLY_RECON_STACK_ 과 같은 범위)
+      - 처리된 행의 S열을 '승계금액'으로 다시 더하던 동작 제거 (메모·부분입금 기록이 돈으로 두 번 계산되던 원인)
+
+    반환: {"processed": 완납 건수, "prepaid": 선충전 추가 금액} / 단가표 로딩 실패 시 {"price_pending": [행]}
     """
-    ws = gc.open_by_key(SPREADSHEET_ID).worksheet(WORK_SHEET)
+    ss = gc.open_by_key(SPREADSHEET_ID)
+    ws = ss.worksheet(WORK_SHEET)
     all_vals = ws.get_all_values()
-    if len(all_vals) < 2:
-        return {"processed": 0, "prepaid": 0}
 
-    # B열 매칭: 담당자명, 사업자명, 별칭 모두 포함
+    # B열 매칭: 담당자명, 사업자명, 대표자명, 별칭 모두 포함
     name_set = _build_name_set(advertiser, cust_info)
 
     # ── [2026-10-15] 단가표 로딩 중 금액 빈칸 대비 ──────────────────
@@ -469,100 +486,86 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0, cust_info=N
     if pending and not _price_sheet_loaded(gc):
         return {"processed": 0, "prepaid": 0, "price_pending": pending}
 
-    # ── 입금 금액 계산 ────────────────────────────────────────────────
-    # H열(미발행): 부가세 없이 원금 그대로
-    # K열(발행): 부가세 포함 → /1.1로 제외
-    if amount_h > 0:
-        remaining_n = amount_h
-    elif amount_k > 0:
-        remaining_n = round(amount_k / 1.1)
-    else:
-        remaining_n = 0
+    # ── 입금 금액 (부가세 제외) ──────────────────────────────────────
+    remaining_n = net_amount(amount_k, amount_h)
+    if remaining_n <= 0:
+        return {"processed": 0, "prepaid": 0}
 
-    # ── 처리된 행 S열 잔액(승계금액) 수집 및 합산 ──────────────────
-    # 컬럼 인덱스 (0-based): B=1, E=4, M=12, N=13, Q=16, R=17, S=18
-    prepaid_rows = []  # R열 채워진 행 중 S열에 잔액 있는 행
-    if remaining_n > 0:
-        for i, row in enumerate(all_vals[1:], start=2):
-            b_val = norm(row[1] if len(row) > 1 else "")
-            if b_val not in name_set:
-                continue
-            r_val = row[17].strip() if len(row) > 17 else ""
-            if not r_val:
-                continue  # 미처리 행 제외 (처리된 행만 확인)
-            s_val = _parse_s_val(row[18] if len(row) > 18 else "")
-            if s_val > 0:
-                prepaid_rows.append({"row": i, "s_val": s_val})
+    cell = lambda row, i: (str(row[i]).strip() if len(row) > i else "")
 
-        # 승계잔액을 remaining_n에 합산
-        total_balance = sum(p["s_val"] for p in prepaid_rows)
-        remaining_n += total_balance
-
-    # ── 미처리 행 수집 ───────────────────────────────────────────────
+    # ── 미입금 건 수집 ───────────────────────────────────────────────
+    # 업무시트 (0-based): B=1, E=4, F=5(의뢰일), M=12, N=13, Q=16, R=17, S=18
     candidates = []
     for i, row in enumerate(all_vals[1:], start=2):
-        b_val = norm(row[1] if len(row) > 1 else "")
-        if b_val not in name_set:
+        if norm(cell(row, 1)) not in name_set:
             continue
-        r_val = row[17].strip() if len(row) > 17 else ""  # R열: 입금자명
-        if r_val:
-            continue  # 이미 입금 처리된 행 제외
-        n_val = parse_amount(row[13] if len(row) > 13 else "")  # N열: 부가세 제외 금액
+        if cell(row, 17):                    # R열 입금자 있음 = 처리된 행
+            continue
+        if cell(row, 16) == "입금완료":       # Q열 입금완료 (R만 비어 있는 수동 처리 행 포함)
+            continue
+        if cell(row, 4) == "반려":
+            continue
+        n_val = parse_amount(cell(row, 13))
         if n_val <= 0:
-            continue  # 금액 없는 행 제외
-        m_val = row[12].strip() if len(row) > 12 else ""       # M열: 링크
-        s_val = _parse_s_val(row[18] if len(row) > 18 else "")  # S열: 기존 부분입금 누적
-        candidates.append({
-            "row":   i,
-            "n_val": n_val,
-            "m_val": m_val,
-            "s_val": s_val,
-        })
+            continue                          # 금액 없는 행 제외
+        candidates.append({"sheet": "work", "row": i, "need_total": n_val,
+                           "paid": _parse_s_val(cell(row, 18)), "m_val": cell(row, 12),
+                           "date": _date_key(cell(row, 5))})
 
-    # ── 순차 할당 ────────────────────────────────────────────────────
-    updates   = []
-    processed = 0
+    # 리뷰 업무시트 (0-based): B=1, N=13(의뢰일), Q=16(매출), T=19(입금여부), U=20(입금자명), W=22(승계금액)
+    try:
+        rws = ss.worksheet(REVIEW_SHEET)
+        r_vals = rws.get_all_values()
+    except Exception:
+        rws, r_vals = None, []
+    for i, row in enumerate(r_vals[1:], start=2):
+        if norm(cell(row, 1)) not in name_set:
+            continue
+        if cell(row, 19) == "입금완료":
+            continue
+        q_val = parse_amount(cell(row, 16))
+        if q_val <= 0:
+            continue
+        candidates.append({"sheet": "review", "row": i, "need_total": q_val,
+                           "paid": _parse_s_val(cell(row, 22)), "m_val": "",
+                           "date": _date_key(cell(row, 13))})
 
-    # 승계잔액을 소비했으므로 해당 행 S열 초기화
-    for p in prepaid_rows:
-        updates.append({"range": f"S{p['row']}", "values": [[""]]})
+    # 의뢰일 오래된 순 (같은 날이면 업무시트 → 리뷰, 위 행부터)
+    candidates.sort(key=lambda c: (c["date"], 0 if c["sheet"] == "work" else 1, c["row"]))
 
+    # ── 순차 배정 ────────────────────────────────────────────────────
+    w_up, r_up = [], []
+    processed  = 0
     for c in candidates:
         if remaining_n <= 0:
             break
+        needed = c["need_total"] - c["paid"]
+        if c["sheet"] == "work":
+            Qc, Rc, Pc, up = "Q", "R", "S", w_up
+        else:
+            Qc, Rc, Pc, up = "T", "U", "W", r_up
 
-        needed = c["n_val"] - c["s_val"]  # 완전처리에 필요한 잔액
-
-        if needed <= 0:
-            # S열이 이미 충족된 예외 케이스 → 완전처리
-            updates.append({"range": f"R{c['row']}", "values": [[payer]]})
-            updates.append({"range": f"Q{c['row']}", "values": [["입금완료"]]})
-            updates.append({"range": f"S{c['row']}", "values": [[""]]})
+        if needed <= 0 or remaining_n >= needed:
+            # 완납 (needed<=0: 부분입금 누적이 이미 금액 이상인 예외 → 돈 쓰지 않고 마감)
+            up.append({"range": f"{Rc}{c['row']}", "values": [[payer]]})
+            up.append({"range": f"{Qc}{c['row']}", "values": [["입금완료"]]})
+            up.append({"range": f"{Pc}{c['row']}", "values": [[""]]})
             if c["m_val"]:
-                updates.append({"range": f"E{c['row']}", "values": [["송출완료"]]})
-            processed += 1
-            continue
-
-        if remaining_n >= needed:
-            # 완전처리
-            updates.append({"range": f"R{c['row']}", "values": [[payer]]})
-            updates.append({"range": f"Q{c['row']}", "values": [["입금완료"]]})
-            updates.append({"range": f"S{c['row']}", "values": [[""]]})
-            if c["m_val"]:
-                updates.append({"range": f"E{c['row']}", "values": [["송출완료"]]})
-            remaining_n -= needed
+                up.append({"range": f"E{c['row']}", "values": [["송출완료"]]})
+            remaining_n -= max(needed, 0)
             processed += 1
         else:
-            # 부분처리 — remaining_n만큼 S열에 누적
-            new_s = c["s_val"] + remaining_n
-            updates.append({"range": f"S{c['row']}", "values": [[new_s]]})
+            # 부분입금 — 누적 금액만 숫자로 기록 (입금자명은 완납 때만)
+            up.append({"range": f"{Pc}{c['row']}", "values": [[c["paid"] + remaining_n]]})
             remaining_n = 0
             break
 
-    if updates:
-        ws.batch_update(updates)
+    if w_up:
+        ws.batch_update(w_up)
+    if r_up and rws:
+        rws.batch_update(r_up)
 
-    # ── 완전처리 후 남은 금액(초과입금) → 선충전잔액에 추가 ──────────
+    # ── 다 배정하고 남은 금액(초과입금·미입금 건 없음) → 선충전잔액에 추가 ──
     prepaid = 0
     if remaining_n > 0:
         ok = add_prepayment(gc, advertiser, remaining_n)

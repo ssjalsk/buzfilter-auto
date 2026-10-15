@@ -187,9 +187,10 @@ function APPLY_RECON_STACK_(row,col,editedValue){
       const r=data[i];
       if(_norm(r[W.B-1])!==advertiser) continue;
       if(_norm(r[W.Q-1])==='입금완료') continue;
+      if(_norm(r[W.E-1])==='반려') continue;   // [2026-10-15] 반려 건에는 배정 안 함
 
       const totalCost  = _num(r[W.N-1]); if(totalCost<=0) continue;
-      const alreadyPaid= _num(r[W.S-1]); // S열: 숫자면 누적 입금액, 텍스트면 0
+      const alreadyPaid= _paidNum_(r[W.S-1]); // S열: 숫자만 누적 입금액 (메모 글자는 0) [2026-10-15]
       const need       = Math.max(0, totalCost - alreadyPaid);
 
       // S에 기록된 금액이 N 이상 → 완납 미처리건 자동 마감
@@ -216,8 +217,10 @@ function APPLY_RECON_STACK_(row,col,editedValue){
           if(_norm(r[RV.B-1])!==advertiser) continue;
           if(_norm(r[RV.T-1])==='입금완료') continue;
           const totalCost=_num(r[RV.Q-1]); if(totalCost<=0) continue;
+          const paidR=_paidNum_(r[RV.W-1]);   // [2026-10-15] W열 부분입금 누적(숫자만)
+          const needR=Math.max(0,totalCost-paidR);
           const dKey=_dateKey(r[RV.O-1]);
-          cands.push({row:i+2, need:totalCost, dKey, alreadyPaid:0, totalCost, st:'review'});
+          cands.push({row:i+2, need:needR, dKey, alreadyPaid:paidR, totalCost, st:'review'});
         }
       }
     }
@@ -245,16 +248,13 @@ function APPLY_RECON_STACK_(row,col,editedValue){
         lastProcessedRow=c.row;
         if(remaining <= TOL){ remaining=0; break; }
       }else{
+        // [2026-10-15] 부분입금: 누적 입금액(숫자)만 기록, 입금자명(R/U)은 완납 때만.
+        //  예전: 입금자명까지 적어 → 자동매칭이 '처리된 행'으로 보고 S를 남은 돈으로 다시 더함(이중 계산)
+        //        리뷰는 '₩XXX 부족' 글자만 남아 다음 입금 때 이미 낸 금액을 몰랐음
         if(c.st==='review'){
-          // ── 리뷰: W열에 부족금액 표시 ────────────────
-          const shortage=c.need-remaining;
-          _setCell(review,c.row,RV.W,'₩'+shortage.toLocaleString()+' 부족');
-          if(payer) _setCell(review,c.row,RV.U,payer);
+          _setCell(review,c.row,RV.W,c.alreadyPaid+remaining);
         }else{
-          // ── 업무시트: S에 누적 입금액(숫자) 저장 ─────
-          const newPaid=c.alreadyPaid+remaining;
-          _setCell(work,c.row,W.S,newPaid);
-          if(payer) _setCell(work,c.row,W.R,payer);
+          _setCell(work,c.row,W.S,c.alreadyPaid+remaining);
         }
         lastProcessedRow=c.row;
         remaining=0;
@@ -273,148 +273,138 @@ function APPLY_RECON_STACK_(row,col,editedValue){
   }
 }
 
+/* ───── [2026-10-15] 정산 공통 유틸 ─────────────────────────────── */
+/** S열(업무)·W열(리뷰) 부분입금 누적액: 숫자·쉼표·₩·원만 있을 때만 금액. 담당자 메모·'₩XXX 부족' 표시는 0 */
+function _paidNum_(v){
+  if(v===null||v===undefined||v==='') return 0;
+  if(typeof v==='number') return isNaN(v)?0:Math.round(v);
+  const s=String(v).trim();
+  if(!s || /부족|초과/.test(s) || !/^[₩￦\s\d,.원\-]+$/.test(s)) return 0;
+  return _num(s);
+}
+/** 이름 비교용: 공백·괄호·하이픈·가운뎃점 제거 + 소문자 (Cloud Function norm 과 동일) */
+function _nameKey_(v){ return String(v===null||v===undefined?'':v).replace(/[\s\-_·・()\[\]]/g,'').toLowerCase(); }
+
+/**
+ * 업무시트/리뷰 B열 고객명 → 고객_DB 행 찾기.
+ * 1순위 담당자명 일치, 없으면 사업자명·대표자명·별칭 일치가 '딱 한 명'일 때만 (여러 명이면 선충전 건드리지 않음)
+ * 반환: {dbRow, prepaid, prepaidCol, payerName} 또는 null
+ */
+function _findPrepaidCustomer_(db, customer){
+  const key=_nameKey_(customer); if(!key) return null;
+  const vals=db.getDataRange().getValues();
+  const h=vals[0]||[];
+  const idx=n=>h.indexOf(n);
+  const iName=idx('담당자명'), iBiz=idx('사업자명'), iRep=idx('대표자명'), iAlias=idx('별칭');
+  let iPre=idx('선충전잔액'); if(iPre<0) iPre=6;   // G열
+  const pick=i=>{
+    const r=vals[i];
+    const aliases=iAlias>=0?String(r[iAlias]||'').split(',').map(a=>a.trim()).filter(a=>a):[];
+    const name=iName>=0?_norm(r[iName]):'', biz=iBiz>=0?_norm(r[iBiz]):'';
+    return {dbRow:i+1, prepaid:_num(r[iPre]), prepaidCol:iPre+1, payerName:(aliases[0]||name||biz)};
+  };
+  for(let i=1;i<vals.length;i++){
+    if(iName>=0 && _nameKey_(vals[i][iName])===key) return pick(i);
+  }
+  const hits=[];
+  for(let i=1;i<vals.length;i++){
+    const r=vals[i];
+    const keys=[iBiz,iRep].filter(c=>c>=0).map(c=>_nameKey_(r[c]));
+    if(iAlias>=0) String(r[iAlias]||'').split(',').forEach(a=>keys.push(_nameKey_(a)));
+    if(keys.some(k=>k && k===key)) hits.push(i);
+  }
+  return hits.length===1?pick(hits[0]):null;
+}
+
+/** 정산 처리 직렬화 (입금 자동매칭 onSettleEdit 과 같은 스크립트 잠금 → 선충전잔액 동시 수정으로 금액 날아가는 것 방지) */
+function _withSettleLock_(fn){
+  let lock=null;
+  try{ lock=LockService.getScriptLock(); if(!lock.tryLock(20000)) lock=null; }catch(e){ lock=null; }
+  try{ return fn(); }
+  finally{ if(lock){ try{ lock.releaseLock(); }catch(e){} } }
+}
+
 /* ───── 선충전 잔액 자동 입금완료 처리 ─────────────────────── */
 /**
- * 업무시트 N열(금액) 입력 시 자동 실행:
- * 1. 고객_DB G열(선충전 잔액) 확인
- * 2. 잔액 >= N열 금액 → Q열='입금완료', DB 잔액 차감, S열 초기화
- * 3. 잔액 < N열 금액  → S열에 '₩XXX 부족' 표시 (입금완료 처리 안 함)
- * 4. 잔액 없는 고객   → 아무것도 안 함 (기존 방식 유지)
+ * 업무시트 진행상태 '입금확인'(직접 선택 또는 M열 링크 입력) 시 실행:
+ * 1. 고객_DB 선충전잔액 확인
+ * 2. 필요액 = N열 금액 - S열 기존 부분입금(숫자만)
+ * 3. 잔액 >= 필요액 → Q=입금완료, R=입금자명, S 비움, 잔액에서 '필요액만' 차감
+ * 4. 잔액 <  필요액 → 잔액 전부 사용: S = 기존 부분입금 + 잔액(숫자), 잔액 0 (입금자명은 완납 때만)
+ * 5. 잔액 없거나 고객 못 찾음 → 아무것도 안 함
+ * [2026-10-15] 예전: S열 무시하고 N 전액 차감(과다 차감) / 부족 시 S를 잔액으로 덮어써 기존 부분입금 사라짐 → 수정
  */
 function _checkPrepaidCredit_(workSheet, row) {
-  const W = { B: 2, N: 14, Q: 17, R: 18, S: 19 };
-  const DB_PREPAID_COL = 7; // G열
-  const DB_ALIAS_COL   = 5; // E열 (별칭 — 통장 입금자명)
+  const W = { B: 2, E: 5, N: 14, Q: 17, R: 18, S: 19 };
+  _withSettleLock_(() => {
+    const customer  = _norm(workSheet.getRange(row, W.B).getValue());
+    const amount    = _num(workSheet.getRange(row, W.N).getValue());
+    const payStatus = _norm(workSheet.getRange(row, W.Q).getValue());
+    const status    = _norm(workSheet.getRange(row, W.E).getValue());
 
-  const customer  = _norm(workSheet.getRange(row, W.B).getValue());
-  const amount    = _num(workSheet.getRange(row, W.N).getValue());
-  const payStatus = _norm(workSheet.getRange(row, W.Q).getValue());
+    // 고객명/금액 없거나 이미 입금완료·반려면 스킵
+    if (!customer || !(amount > 0) || payStatus === '입금완료' || status === '반려') return;
 
-  // 고객명/금액 없거나 이미 입금완료면 스킵
-  if (!customer || !(amount > 0) || payStatus === '입금완료') return;
+    const db = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('고객_DB');
+    if (!db) return;
+    const c = _findPrepaidCustomer_(db, customer);
+    if (!c || !(c.prepaid > 0)) return;
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const db = ss.getSheetByName('고객_DB');
-  if (!db) return;
+    const paid = _paidNum_(workSheet.getRange(row, W.S).getValue());
+    const need = Math.max(0, amount - paid);
 
-  // 고객_DB에서 일치하는 행 찾기 (담당자명 또는 사업자명)
-  const dbVals  = db.getDataRange().getValues();
-  const header  = dbVals[0] || [];
-  const nameIdx = header.indexOf('담당자명');
-  const bizIdx  = header.indexOf('사업자명');
-  const aliasIdx= header.indexOf('별칭');  // E열: 통장 입금자명
-
-  let dbRowNum  = -1;
-  let prepaid   = 0;
-  let payerName = '';
-
-  for (let i = 1; i < dbVals.length; i++) {
-    const r        = dbVals[i];
-    const name     = nameIdx  >= 0 ? _norm(r[nameIdx])  : '';
-    const biz      = bizIdx   >= 0 ? _norm(r[bizIdx])   : '';
-    const rawAlias = aliasIdx >= 0 ? _norm(r[aliasIdx]) : '';
-
-    // 별칭은 쉼표 구분 목록 → 각각 비교
-    const aliases  = rawAlias ? rawAlias.split(',').map(a => a.trim()).filter(a => a) : [];
-    const isMatch  = name === customer || biz === customer || aliases.includes(customer);
-
-    if (isMatch) {
-      dbRowNum = i + 1; // 1-indexed
-      prepaid  = _num(r[DB_PREPAID_COL - 1]); // G열 = index 6
-
-      // 입금자명: 별칭 첫 번째 값 → 없으면 담당자명 → 없으면 사업자명
-      payerName = (aliases[0] || name || biz);
-      break;
+    if (c.prepaid >= need) {
+      if (c.payerName) _setCell(workSheet, row, W.R, c.payerName);
+      _setCell(workSheet, row, W.Q, '입금완료');
+      workSheet.getRange(row, W.S).clearContent();
+      _updateStatusIfPublished_(workSheet, row);
+      db.getRange(c.dbRow, c.prepaidCol).setValue(c.prepaid - need);
+    } else {
+      db.getRange(c.dbRow, c.prepaidCol).setValue(0);
+      _setCell(workSheet, row, W.S, paid + c.prepaid);
     }
-  }
-
-  // DB에 고객 없거나 선충전 잔액 없으면 스킵
-  if (dbRowNum < 0 || !(prepaid > 0)) return;
-
-  if (prepaid >= amount) {
-    // ── 완납: 입금자명 기입 + 입금완료 처리 + 고객_DB 잔액 차감 ──
-    if (payerName) _setCell(workSheet, row, W.R, payerName); // R열: 입금자명
-    _setCell(workSheet, row, W.Q, '입금완료');               // Q열: 입금완료
-    workSheet.getRange(row, W.S).clearContent();
-    _updateStatusIfPublished_(workSheet, row);
-    db.getRange(dbRowNum, DB_PREPAID_COL).setValue(prepaid - amount);
-  } else {
-    // ── 잔액 부족: 선충전 전액 차감 + S열에 처리된 금액(숫자) 저장 ──
-    // prepaid = 선충전으로 처리된 금액 → 실입금 처리 시 already-paid로 인식
-    db.getRange(dbRowNum, DB_PREPAID_COL).setValue(0);
-    _setCell(workSheet, row, W.S, prepaid);
-  }
+  });
 }
 
 /* ───── 리뷰 업무시트 선충전 잔액 자동 입금완료 처리 ──────────── */
 /**
- * 리뷰 업무시트 Q열(매출금액) 입력 시 자동 실행:
- * 1. 고객_DB G열(선충전 잔액) 확인
- * 2. 잔액 >= Q열 금액 → T열='입금완료', DB 잔액 차감, W열 초기화
- * 3. 잔액 < Q열 금액  → W열에 '₩XXX 부족' 표시 (입금완료 처리 안 함)
- * 4. 잔액 없는 고객   → 아무것도 안 함
+ * 리뷰 업무시트 B열(고객명)·Q열(매출) 입력 시 실행 (REVIEW_Trigger):
+ * 1. 고객_DB 선충전잔액 확인
+ * 2. 필요액 = Q열 매출 - W열 기존 부분입금(숫자만)
+ * 3. 잔액 >= 필요액 → T=입금완료, U=입금자명, W 비움, 잔액에서 필요액만 차감
+ * 4. 잔액 <  필요액 → 잔액 전부 사용: W = 기존 부분입금 + 잔액(숫자), 잔액 0
+ * [2026-10-15] 예전: 진행상태 '입금확인'일 때만 실행 → 리뷰 시트엔 그 상태가 없어 사실상 작동 안 함.
+ *              부족 시 W에 '₩XXX 부족' 글자만 남기고 잔액은 그대로 → 수정
  */
 function _checkPrepaidCredit_Review_(reviewSheet, row) {
   const R = { B: 2, Q: 17, T: 20, U: 21, W: 23 };
-  const DB_PREPAID_COL = 7; // G열
-  const DB_ALIAS_COL   = 5; // E열 (별칭 — 통장 입금자명)
-
-  // Q열이 수식일 수 있으므로 flush()로 최신값 보장 후 읽기
   SpreadsheetApp.flush();
+  _withSettleLock_(() => {
+    const customer  = _norm(reviewSheet.getRange(row, R.B).getValue());
+    const amount    = _num(reviewSheet.getRange(row, R.Q).getValue());
+    const payStatus = _norm(reviewSheet.getRange(row, R.T).getValue());
+    if (!customer || !(amount > 0) || payStatus === '입금완료') return;
 
-  const customer  = _norm(reviewSheet.getRange(row, R.B).getValue());
-  const amount    = _num(reviewSheet.getRange(row, R.Q).getValue());
-  const payStatus = _norm(reviewSheet.getRange(row, R.T).getValue());
+    const db = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('고객_DB');
+    if (!db) return;
+    const c = _findPrepaidCustomer_(db, customer);
+    if (!c || !(c.prepaid > 0)) return;
 
-  if (!customer || !(amount > 0) || payStatus === '입금완료') return;
+    const paid = _paidNum_(reviewSheet.getRange(row, R.W).getValue());
+    const need = Math.max(0, amount - paid);
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const db = ss.getSheetByName('고객_DB');
-  if (!db) return;
-
-  const dbVals  = db.getDataRange().getValues();
-  const header  = dbVals[0] || [];
-  const nameIdx = header.indexOf('담당자명');
-  const bizIdx  = header.indexOf('사업자명');
-  const aliasIdx= header.indexOf('별칭');  // E열: 통장 입금자명
-
-  let dbRowNum  = -1;
-  let prepaid   = 0;
-  let payerName = '';
-
-  for (let i = 1; i < dbVals.length; i++) {
-    const r        = dbVals[i];
-    const name     = nameIdx  >= 0 ? _norm(r[nameIdx])  : '';
-    const biz      = bizIdx   >= 0 ? _norm(r[bizIdx])   : '';
-    const rawAlias = aliasIdx >= 0 ? _norm(r[aliasIdx]) : '';
-
-    const aliases  = rawAlias ? rawAlias.split(',').map(a => a.trim()).filter(a => a) : [];
-    const isMatch  = name === customer || biz === customer || aliases.includes(customer);
-
-    if (isMatch) {
-      dbRowNum = i + 1;
-      prepaid  = _num(r[DB_PREPAID_COL - 1]);
-
-      // 입금자명: 별칭 첫 번째 값 → 없으면 담당자명 → 없으면 사업자명
-      payerName = (aliases[0] || name || biz);
-      break;
+    if (c.prepaid >= need) {
+      if (c.payerName) _setCell(reviewSheet, row, R.U, c.payerName);
+      _setCell(reviewSheet, row, R.T, '입금완료');
+      reviewSheet.getRange(row, R.W).clearContent();
+      db.getRange(c.dbRow, c.prepaidCol).setValue(c.prepaid - need);
+    } else {
+      db.getRange(c.dbRow, c.prepaidCol).setValue(0);
+      _setCell(reviewSheet, row, R.W, paid + c.prepaid);
     }
-  }
-
-  if (dbRowNum < 0 || !(prepaid > 0)) return;
-
-  if (prepaid >= amount) {
-    // ── 완납: 입금자명 기입 + 입금완료 처리 + 고객_DB 잔액 차감 ──
-    if (payerName) _setCell(reviewSheet, row, R.U, payerName); // U열: 입금자명
-    _setCell(reviewSheet, row, R.T, '입금완료');               // T열: 입금완료
-    reviewSheet.getRange(row, R.W).clearContent();
-    db.getRange(dbRowNum, DB_PREPAID_COL).setValue(prepaid - amount);
-  } else {
-    // ── 잔액 부족: W열에 부족금액 표시 ───────────────────────────
-    const shortage = amount - prepaid;
-    _setCell(reviewSheet, row, R.W, '₩' + shortage.toLocaleString() + ' 부족');
-  }
+  });
 }
+
 
 /* ───── 선충전 디버그 (Apps Script 에디터에서 직접 실행) ───────────
  * ROW_TO_TEST에 업무시트 실제 행 번호 입력 후 실행 → 로그 확인
