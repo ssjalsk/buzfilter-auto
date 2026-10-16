@@ -1,4 +1,4 @@
-import os, json, re, time, functions_framework
+import os, json, re, time, itertools, functions_framework
 from google.oauth2.service_account import Credentials
 import gspread
 
@@ -247,12 +247,12 @@ def write_record(gc, row_idx, amount_n):
     ws.update_cell(row_idx, RECORD_COL, amount_n)
 
 
-def mark_amount_cell(gc, row_idx, note, warn):
-    """K열(입금액)에 메모 + 경고 시 연한 빨간 배경 (처리 결과를 시트에서 바로 확인)"""
+def mark_amount_cell(gc, row_idx, note, warn, col="K"):
+    """입금액 칸(K, 미발행이면 H)에 메모 + 경고 시 연한 빨간 배경 (처리 결과를 시트에서 바로 확인)"""
     ws = gc.open_by_key(SETTLE_SPREADSHEET_ID).worksheet(SETTLE_SHEET)
-    ws.update_note(f"K{row_idx}", note)
+    ws.update_note(f"{col}{row_idx}", note)
     color = {"red": 1.0, "green": 0.85, "blue": 0.85} if warn else {"red": 1.0, "green": 1.0, "blue": 1.0}
-    ws.format(f"K{row_idx}", {"backgroundColor": color})
+    ws.format(f"{col}{row_idx}", {"backgroundColor": color})
 
 
 def process_amount_change(gc, row_idx, payer, amount_k, amount_h):
@@ -304,6 +304,11 @@ def process_amount_change(gc, row_idx, payer, amount_k, amount_h):
                          f"⚠️ 금액 증가 {diff:,}원 — 단가표(업무시트 N열 금액)를 불러오지 못해 처리하지 않았습니다.\n"
                          f"업무시트 {result['price_pending']}행 금액이 보이는지 확인 후 K열 금액을 다시 입력해 주세요.", warn=True)
         return {"action": "price_pending", "diff": diff, "rows": result["price_pending"]}
+    if result.get("already_paid"):
+        mark_amount_cell(gc, row_idx,
+                         f"⚠️ 금액 증가 {diff:,}원 — 미입금 건이 없고 최근 입금완료 건({', '.join(result['already_paid'])})과 금액이 같아 선충전에 적립하지 않았습니다.\n"
+                         f"새로 미리 낸 돈이면 고객_DB 선충전잔액에 직접 더해 주세요.", warn=True)
+        return {"action": "increase", "diff": diff, **result}
     mark_amount_cell(gc, row_idx,
                      f"✅ 금액 증가 반영: {recorded:,}원 → {new_n:,}원 (부가세 제외)\n"
                      f"차액 {diff:,}원 추가 처리 — 완료 {result['processed']}건, 선충전 {result['prepaid']:,}원",
@@ -569,6 +574,14 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0, cust_info=N
     if r_up and rws:
         rws.batch_update(r_up)
 
+    # ── [2026-10-16] 미입금 건이 하나도 없어 입금 전액이 선충전으로 갈 상황 ──
+    # 최근(3일) 이미 입금완료된 업무·리뷰 건 합계가 입금액과 정확히 같으면 → 담당자가 먼저 입금완료 처리한 같은 돈.
+    # 선충전에 넣지 않고 표시만 (리뷰 업무시트는 담당자가 직접 입금완료 → 예전엔 같은 돈이 선충전에도 쌓였음)
+    if remaining_n > 0 and remaining_n == net_amount(amount_k, amount_h):
+        hit = _already_paid_match(all_vals, r_vals, name_set, remaining_n)
+        if hit:
+            return {"processed": 0, "prepaid": 0, "already_paid": hit}
+
     # ── 다 배정하고 남은 금액(초과입금·미입금 건 없음) → 선충전잔액에 추가 ──
     prepaid = 0
     if remaining_n > 0:
@@ -577,6 +590,37 @@ def update_work_sheet(gc, advertiser, payer, amount_k=0, amount_h=0, cust_info=N
             prepaid = remaining_n
 
     return {"processed": processed, "prepaid": prepaid}
+
+
+def _already_paid_match(all_vals, r_vals, name_set, amount, days=3):
+    """이 고객의 최근 입금완료 건(업무: R이 '선충전(' 아닌 것 / 리뷰: T=입금완료) 중 합계가 amount 와 같은 조합.
+    반환: ['업무 3924행', '리뷰 235행', ...] 또는 [] (최근 건 12개, 최대 8건 조합)"""
+    import datetime
+    today = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+    since = (today - datetime.timedelta(days=days)).date()
+    def recent(v):
+        k = _date_key(v)
+        try:
+            return k[0] != 9999 and datetime.date(*k) >= since
+        except Exception:
+            return False
+    cell = lambda row, i: (str(row[i]).strip() if len(row) > i else "")
+    pool = []
+    for i, row in enumerate(all_vals[1:], start=2):
+        if norm(cell(row, 1)) in name_set and cell(row, 16) == "입금완료" and not cell(row, 17).startswith("선충전(") \
+                and recent(cell(row, 5)):
+            pool.append((f"업무 {i}행", parse_amount(cell(row, 13)), _date_key(cell(row, 5))))
+    for i, row in enumerate(r_vals[1:], start=2):
+        if norm(cell(row, 1)) in name_set and cell(row, 19) == "입금완료" and recent(cell(row, 13)):
+            pool.append((f"리뷰 {i}행", parse_amount(cell(row, 16)), _date_key(cell(row, 13))))
+    pool = [p for p in pool if p[1] > 0]
+    pool.sort(key=lambda p: p[2], reverse=True)
+    pool = pool[:12]
+    for n in range(1, min(8, len(pool)) + 1):
+        for combo in itertools.combinations(pool, n):
+            if abs(sum(p[1] for p in combo) - amount) <= 10:
+                return [p[0] for p in combo]
+    return []
 
 
 @functions_framework.http
@@ -630,6 +674,7 @@ def match_payment(request):
         except Exception:
             f_now = ac_now = ""
         if f_now or ac_now:
+            print(json.dumps({"event": "skip_duplicate", "row": row, "payer": payer, "F": f_now, "AC": ac_now}, ensure_ascii=False))
             return (json.dumps({"ok": True, "matched": None, "skipped": True,
                                 "msg": f"행 {row}: 이미 처리된 입금 행 (F='{f_now}', AC='{ac_now}') — 중복 요청 무시"}), 200,
                     {"Content-Type": "application/json"})
@@ -657,6 +702,22 @@ def match_payment(request):
                                     "msg": f"'{payer}' → {matched}: 단가표 로딩 실패로 수동확인 (업무시트 {result['price_pending']}행)"}),
                         200, {"Content-Type": "application/json"})
             write_record(gc, int(row), net_amount(amount_k, amount_h))   # 처리 금액 기록 (금액 변경 시 차액 기준)
+            # [2026-10-16] 선충전 관련 결과는 입금액 칸에 메모 + 색 표시 → 담당자 검토
+            amt_col = "H" if amount_h > 0 else "K"
+            if result.get("already_paid"):
+                mark_amount_cell(gc, int(row),
+                                 f"⚠️ 선충전 적립 안 함 — 미입금 건이 없고, 최근 이미 입금완료된 건과 금액이 같습니다.\n"
+                                 f"({', '.join(result['already_paid'])})\n"
+                                 f"같은 돈이면 그대로 두시고, 새로 미리 낸 돈(선입금)이면 고객_DB 선충전잔액에 직접 더해 주세요.",
+                                 warn=True, col=amt_col)
+            elif result.get("prepaid"):
+                mark_amount_cell(gc, int(row),
+                                 f"💰 선충전 적립 {result['prepaid']:,}원 (미입금 건 처리 {result['processed']}건 후 남은 금액)\n"
+                                 f"이미 입금완료 처리한 건의 돈이면 고객_DB 선충전잔액에서 빼 주세요.",
+                                 warn=True, col=amt_col)
+            print(json.dumps({"event": "match", "row": row, "payer": payer, "cust": matched,
+                              "amount_n": net_amount(amount_k, amount_h), **{k: v for k, v in result.items()}},
+                             ensure_ascii=False))
             return (json.dumps({
                 "ok":        True,
                 "matched":   matched,
