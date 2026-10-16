@@ -36,11 +36,11 @@ function onKEdit(e) {
   if (row <= LAYOUT.headerRows) return;
   var val = Number(String(e.range.getValue() || '').replace(/[,\s₩]/g, ''));
   if (!(val > 0)) return;
-  _renumberEmptySlots_(sheet);
+  _renumberEmptySlotsBBW_(sheet);
 }
 
 /* ── 빈 슬롯(B열 비어있는 행) A열에 1부터 번호 부여 ── */
-function _renumberEmptySlots_(sheet) {
+function _renumberEmptySlotsBBW_(sheet) {
   var lastRow  = Math.max(sheet.getLastRow(), LAYOUT.headerRows + SLOT_COUNT);
   var dataRows = lastRow - LAYOUT.headerRows;
   if (dataRows <= 0) return;
@@ -80,6 +80,6 @@ function installTrigger() {
 /* ── 수동 즉시 갱신 (메뉴에서 실행) ── */
 function testRenumber() {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  _renumberEmptySlots_(sheet);
+  _renumberEmptySlotsBBW_(sheet);
   SpreadsheetApp.getUi().alert('✅ 회차 갱신 완료');
 }

@@ -31,7 +31,8 @@ const HYB = {
     LINK: 13,          // M 기사링크
     SALES: 14,         // N 매출금액 (수식 → 최종반려 시 0 덮어씀)
     COST: 15,          // O 원가
-    EXECUTOR_CACHE: 27 // AA 실행사_캐시
+    EXECUTOR_CACHE: 27, // AA 실행사_캐시
+    TASK_ID: 29        // AC 고유번호 (실행사 시트 칸 메모와 연결) [2026-10-16]
   },
 
   EXECUTOR_MAP: {
@@ -99,20 +100,166 @@ function getVeganSection_(media, material) {
   return '특수';
 }
 
+// ============== [2026-10-16] 고유번호·슬롯 관리 ==============
+/**
+ * 업무마다 고유번호(업무시트 AC열)를 붙이고, 실행사 시트의 그 칸 B열(주제) 메모에 'HYB:<번호>@<업무시트 행>' 로 기록.
+ * 수정·반려·링크 입력 때 회차가 아니라 고유번호로 정확히 그 칸을 찾음
+ * → 회차 번호가 여러 달·충전 구간에 겹쳐도, 다른 실행사 회차가 L열에 남아 있어도 다른 고객 칸을 건드리지 않음.
+ * 고유번호가 없는 예전 건: '회차+주제'(지금 실행사 회차일 때만) → '주제+송출일' 이 맞는 칸만 인정. 주제가 다른 칸은 절대 덮어쓰지 않음.
+ */
+const ID_TAG = 'HYB:';
+const DATA_START_ROW = 3;   // 실행사 시트: 1행 제목, 2행 머리글
+
+// 회차 자동 채우기: 갱신(월초·월요일·충전) 때 이만큼 번호 칸 확보, 평소엔 남은 칸이 SLOT_LOW 이하이면 같은 만큼 이어 붙임
+const SLOT_CFG = {
+  '플래나 송출': { target: 150 },
+  '이디엘 송출': { target: 15 },
+  '한미마 송출': { target: 30 },
+  '공감신문':    { target: 58, cap: 58 },   // 58회차 계약 — 58까지만
+  [BBW_KEY]:     { target: 30 },
+  [EPR_KEY]:     { target: 20 }
+  // 비건뉴스: 섹션별 결제 단위(100회·30회)라 자동 채우기 제외
+};
+const SLOT_LOW = 5;
+
+function _newTaskId_() {
+  return Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyMMddHHmmss') + Utilities.getUuid().replace(/-/g, '').slice(0, 8);
+}
+function _parseTag_(note) {
+  const m = String(note || '').match(/HYB:([^@\s]+)(?:@(\d+))?/);
+  return m ? { id: m[1], row: m[2] ? Number(m[2]) : 0 } : null;
+}
+function _setTag_(sheet, rowIndex, subjectCol, id, mainRow) {
+  sheet.getRange(rowIndex, subjectCol).setNote(id ? `${ID_TAG}${id}@${mainRow}` : '');
+}
+
+/** 업무시트 행의 고유번호 { id, dup } — 없으면 새로 만듦. dup=같은 번호가 다른 행에도 있음(행 복사) */
+function _taskIdOf_(main, row) {
+  const cell = main.getRange(row, HYB.COL.TASK_ID);
+  let id = String(cell.getValue() || '').trim();
+  if (!id) { id = _newTaskId_(); cell.setValue(id); return { id, dup: false }; }
+  const last = main.getLastRow();
+  const ids  = main.getRange(2, HYB.COL.TASK_ID, last - 1, 1).getValues();
+  const dup  = ids.some((r, i) => i + 2 !== row && String(r[0]).trim() === id);
+  return { id, dup };
+}
+/** 행 복사로 번호가 겹쳤는데 이 행이 원래 주인이 아니면 → 새 번호 + L·실행사기억 비움 (새 업무로 처리) */
+function _regenTaskId_(main, row) {
+  const id = _newTaskId_();
+  main.getRange(row, HYB.COL.TASK_ID).setValue(id);
+  main.getRange(row, HYB.COL.ROUND).setValue('');
+  main.getRange(row, HYB.COL.EXECUTOR_CACHE).setValue('');
+  log_('INFO', '고유번호 중복(행 복사) → 새 번호', { row, id });
+  return id;
+}
+
+/** 실행사 시트 슬롯 읽기: vals(DATA_START_ROW부터), tags(B열 메모 파싱) */
+function _readSlots_(sheet, layout) {
+  const last = sheet.getLastRow();
+  const n = last - DATA_START_ROW + 1;
+  if (n <= 0) return { vals: [], tags: [] };
+  const maxCol = Math.max(layout.A_round, layout.B_subject, layout.C_date, layout.G_cost || 1, layout.H_flag || 1, layout.E_flag || 1, layout.D_link || 1);
+  const vals  = sheet.getRange(DATA_START_ROW, 1, n, maxCol).getValues();
+  const notes = sheet.getRange(DATA_START_ROW, layout.B_subject, n, 1).getNotes();
+  return { vals, tags: notes.map(r => _parseTag_(r[0])) };
+}
+const _rowOf_ = i => i + DATA_START_ROW;
+const _cellStr_ = (vals, i, col) => String(vals[i][col - 1] === null || vals[i][col - 1] === undefined ? '' : vals[i][col - 1]).trim();
+
+function _isRejectedSlot_(sheetName, layout, vals, i) {
+  if (layout.E_flag) return _cellStr_(vals, i, layout.E_flag) === '반려';          // 비건 섹션
+  if (sheetName === '이디엘 송출') return _cellStr_(vals, i, layout.G_cost) === '반려';
+  return layout.H_flag ? _cellStr_(vals, i, layout.H_flag) === '반려' : false;
+}
+
+/** 현재 회차 구간 시작 인덱스: 빈 칸 첫 번호가 1이면(막 갱신) 그 칸, 아니면 마지막으로 1회차가 쓰인 칸. 공감·비건=0(구간 없음) */
+function _cycleStartIdx_(sheetName, layout, vals) {
+  if (!SLOT_CFG[sheetName] || SLOT_CFG[sheetName].cap) return 0;
+  let lastUsed = -1;
+  for (let i = vals.length - 1; i >= 0; i--) if (_cellStr_(vals, i, layout.B_subject)) { lastUsed = i; break; }
+  if (lastUsed + 1 < vals.length && _cellStr_(vals, lastUsed + 1, layout.A_round) === '1') return lastUsed + 1;
+  for (let i = lastUsed; i >= 0; i--) {
+    if (_cellStr_(vals, i, layout.A_round) === '1' && _cellStr_(vals, i, layout.B_subject)) return i;
+  }
+  return 0;
+}
+
+/**
+ * 이 업무가 이미 들어간 칸 찾기 → 인덱스 또는 -1
+ *  1) 고유번호 일치 (행 복사로 번호가 겹친 경우엔 기록된 업무시트 행이 같거나 주제+송출일이 같을 때만)
+ *  2) [예전 건] 회차+주제 일치 — roundTrusted(지금 실행사의 회차일 때)만, 고유번호 없는 칸만, 송출일 가까운 칸
+ *  3) [예전 건] 주제+송출일 일치 — 고유번호 없는 칸만
+ */
+function _findTaskSlot_(S, layout, { id, dup, mainRow, roundTrusted, subject, sendDateStr }) {
+  const { vals, tags } = S;
+  const d = normalizeDateString_(sendDateStr);
+  if (id) {
+    for (let i = vals.length - 1; i >= 0; i--) {
+      const t = tags[i];
+      if (!t || t.id !== id) continue;
+      if (!dup || t.row === mainRow ||
+          (_cellStr_(vals, i, layout.B_subject) === subject && normalizeDateString_(vals[i][layout.C_date - 1]) === d)) return i;
+    }
+  }
+  if (roundTrusted) {
+    let best = -1, bestGap = Infinity;
+    for (let i = 0; i < vals.length; i++) {
+      if (tags[i]) continue;
+      if (_cellStr_(vals, i, layout.A_round) !== String(roundTrusted)) continue;
+      if (_cellStr_(vals, i, layout.B_subject) !== subject) continue;
+      const gap = Math.abs(_dayNum_(vals[i][layout.C_date - 1]) - _dayNum_(sendDateStr));
+      if (gap <= bestGap) { best = i; bestGap = gap; }
+    }
+    if (best >= 0) return best;
+  }
+  for (let i = vals.length - 1; i >= 0; i--) {
+    if (tags[i]) continue;
+    if (_cellStr_(vals, i, layout.B_subject) === subject && normalizeDateString_(vals[i][layout.C_date - 1]) === d) return i;
+  }
+  return -1;
+}
+function _dayNum_(v) {
+  const s = normalizeDateString_(v); const p = s.split('.');
+  if (p.length !== 3) return 0;
+  const t = new Date(+p[0], +p[1] - 1, +p[2]).getTime();
+  return isNaN(t) ? 0 : Math.round(t / 86400000);
+}
+
+/** 새로 배정할 칸: 현재 회차 구간 안의 첫 빈 칸 (공감신문은 반려로 비워진 칸 포함 맨 위부터) */
+function _newSlotIdx_(sheetName, layout, S) {
+  const start = _cycleStartIdx_(sheetName, layout, S.vals);
+  for (let i = start; i < S.vals.length; i++) {
+    if (!_cellStr_(S.vals, i, layout.B_subject)) return i;
+  }
+  return -1;
+}
+
+/**
+ * 업무 배정/갱신 공통: 이 업무 칸이 있으면 그 칸, 없으면 새 칸.
+ * 이 업무의 반려 칸은 현재 회차 구간 안일 때만 재사용 (대표님 기준: 같은 업무가 돌아오면 그 반려 회차 자리 사용,
+ * 단 지난달·지난 충전 구간 칸은 쓰지 않음)
+ */
+function _resolveAssignSlot_(sheetName, layout, S, key) {
+  let i = _findTaskSlot_(S, layout, key);
+  if (i >= 0 && _isRejectedSlot_(sheetName, layout, S.vals, i) && i < _cycleStartIdx_(sheetName, layout, S.vals)) i = -1;
+  if (i < 0) i = _newSlotIdx_(sheetName, layout, S);
+  return i;
+}
+
 // ============== 설치형 트리거 진입 ==============
 function HYB_Trigger(e) {
   try {
     if (!e || !e.range) return;
     const sheet = e.range.getSheet();
 
-    // ── 한미마 K열 충전 감지 → 빈 슬롯 재번호화 ──────────────
+    // ── 한미마 K열 충전 감지 → 회차 갱신 (빈 칸 1부터 + 30칸 확보) ──────────────
     if (sheet.getName() === '한미마 송출') {
       const col = e.range.getColumn();
       const row = e.range.getRow();
       if (col === 11 && row >= 2) {          // K열(11) = 충전 금액
         const val = Number(String(e.range.getValue() || '').replace(/[,\s]/g, ''));
         if (val > 0) {
-          _renumberEmptySlots_(sheet, HYB.TARGET_LAYOUT['한미마 송출'], row + 1);
+          _ensureSlots_(sheet, '한미마 송출', HYB.TARGET_LAYOUT['한미마 송출'], true);
           log_('INFO', '한미마 충전 리셋', { chargedRow: row, amount: val });
         }
       }
@@ -150,12 +297,16 @@ function HYB_Trigger(e) {
 
     const targetSheetName = HYB.EXECUTOR_MAP[execNow] || '';
     const isVegan         = (targetSheetName === '비건뉴스');
+    const task = _taskIdOf_(sheet, row);
+    // L열 회차는 '지금 실행사의 회차'로 확인될 때만 사용 (다른 실행사 회차가 남아 엉뚱한 칸을 찾는 버그 방지)
+    const roundTrusted = (execCache && execCache === execNow) ? roundNow : '';
+    const ctx = { row, subject, sendDateStr, media, material, cost, link, task, roundTrusted, linkOnly: col === HYB.COL.LINK };
 
     // 0) E열(진행상태) = '반려' → 최종 반려 처리 (재배정 없음)
     if (col === HYB.COL.STATUS) {
       const statusVal = String(sheet.getRange(row, HYB.COL.STATUS).getValue() || '').trim();
       if (statusVal === '반려') {
-        handleFinalReject_({ row, sheet, subject, sendDateStr, media, material, roundNow, execNow });
+        handleFinalReject_({ ...ctx, sheet, roundNow, execNow, execCache });
       }
       lock.releaseLock();
       return;
@@ -164,36 +315,24 @@ function HYB_Trigger(e) {
     // 1) 실행사 변경 감지 → 반려 이벤트
     const isExecChanged = !!execCache && execCache !== execNow;
     if (isExecChanged) {
-      // 이전 미디어 정보를 캐시에서 읽을 수 없으므로 현재 media/material 사용
-      // (반려 시 이전 섹션 탐색은 회차로 먼저 시도)
-      handleRejectAndReassign_({
-        row, subject, sendDateStr, media, material, cost, link,
-        oldExecutor: execCache,
-        newExecutor: execNow,
-        roundNow
-      });
+      handleRejectAndReassign_({ ...ctx, oldExecutor: execCache, newExecutor: execNow, roundNow });
       lock.releaseLock();
       return;
     }
 
-    // 2) 링크만 편집
-    if (col === HYB.COL.LINK) {
-      if (!targetSheetName) { log_('WARN','Link edit skipped: executor not set',{row}); lock.releaseLock(); return; }
-      if (isVegan) {
-        handleVeganLinkUpsert_({ row, subject, sendDateStr, link, media, material });
-      } else {
-        handleLinkUpsert_({ row, subject, sendDateStr, link, targetSheetName });
-      }
+    // 실행사 기억은 없는데 실행사가 비었거나 목록에 없음 → 남은 L열 회차 비움
+    if (!targetSheetName) {
+      if (roundNow && !execCache) sheet.getRange(row, HYB.COL.ROUND).setValue('');
+      log_('WARN', col === HYB.COL.LINK ? 'Link edit skipped: executor not set' : 'Base upsert skipped: executor not set', { row });
       lock.releaseLock();
       return;
     }
 
-    // 3) 기본 업서트(G/I/J/K)
-    if (!targetSheetName) { log_('WARN','Base upsert skipped: executor not set',{row}); lock.releaseLock(); return; }
+    // 2) 링크 편집 / 3) 기본 업서트(G/I/J/K) — 둘 다 이 업무 칸을 찾아 갱신(없으면 새 칸 배정)
     if (isVegan) {
-      handleVeganUpsert_({ row, subject, sendDateStr, media, material });
+      handleVeganUpsert_(ctx);
     } else {
-      handleBaseUpsert_({ row, subject, sendDateStr, media, material, cost, targetSheetName });
+      handleBaseUpsert_({ ...ctx, targetSheetName });
     }
     lock.releaseLock();
 
@@ -203,217 +342,121 @@ function HYB_Trigger(e) {
   }
 }
 
-// ============== 기본/링크 업서트 (기존 시트) ==============
-function handleBaseUpsert_({ row, subject, sendDateStr, media, material, cost, targetSheetName }) {
-  const ss     = SpreadsheetApp.getActiveSpreadsheet();
-  const main   = ss.getSheetByName(HYB.MAIN_SHEET);
-  const target = getTargetSheet_(targetSheetName);   // ← 외부 시트 지원
+// ============== 기본 업서트 (플래나·한미마·이디엘·공감·외부 시트) ==============
+function handleBaseUpsert_({ row, subject, sendDateStr, media, material, cost, link, task, roundTrusted, targetSheetName, linkOnly }) {
+  const main   = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HYB.MAIN_SHEET);
+  const target = getTargetSheet_(targetSheetName);
   const layout = HYB.TARGET_LAYOUT[targetSheetName];
   if (!target || !layout) { log_('ERROR','Target missing',{targetSheetName}); return; }
 
-  // ── 플래나 월 리셋 체크 ──────────────────────────────────────
-  if (targetSheetName === '플래나 송출') {
-    _checkPlannerMonthReset_(target, layout);
+  if (targetSheetName === '플래나 송출') _checkPlannerMonthReset_(target, layout);
+
+  const S = _readSlots_(target, layout);
+  let key = { id: task.id, dup: task.dup, mainRow: row, roundTrusted, subject, sendDateStr };
+  let i = _findTaskSlot_(S, layout, key);
+  if (i < 0 && task.dup) {               // 행 복사본 → 새 업무로
+    key = { ...key, id: _regenTaskId_(main, row), dup: false, roundTrusted: '' };
   }
+  const existing = i >= 0 && !_isRejectedSlot_(targetSheetName, layout, S.vals, i);
+  i = _resolveAssignSlot_(targetSheetName, layout, S, key);
+  if (i < 0) { log_('WARN','No free slot',{targetSheetName}); return; }
+  const rowIndex = _rowOf_(i);
 
-  const resolved = resolveRowForBase_(target, layout, {
-    roundNow: String(main.getRange(row, HYB.COL.ROUND).getValue() || '').trim(),
-    subject, sendDateStr
-  });
-  if (!resolved) { log_('INFO','Base upsert: no row to update',{targetSheetName}); return; }
+  if (linkOnly && existing) {
+    // 링크만 입력: 이미 있는 이 업무 칸의 링크만 갱신 (담당자가 직접 적은 금액·'결제 완' 등 보존)
+    target.getRange(rowIndex, layout.linkCol).setValue(link || '');
+  } else {
+    applyBaseFields_(target, layout, rowIndex, { subject, sendDateStr, media, material, cost });
+    if (link) target.getRange(rowIndex, layout.linkCol).setValue(link);
+  }
+  _setTag_(target, rowIndex, layout.B_subject, key.id, row);
 
-  applyBaseFields_(target, layout, resolved, { subject, sendDateStr, media, material, cost });
-
-  const roundVal = String(target.getRange(resolved, layout.A_round).getValue() || '').trim();
-  main.getRange(row, HYB.COL.ROUND).setValue(roundVal);
-  // ★ 버그수정: getActiveSheet() 대신 main으로 고정
-  const execNow = main.getRange(row, HYB.COL.EXECUTOR).getValue();
-  if (execNow) main.getRange(row, HYB.COL.EXECUTOR_CACHE).setValue(execNow);
-}
-
-function handleLinkUpsert_({ row, subject, sendDateStr, link, targetSheetName }) {
-  const ss     = SpreadsheetApp.getActiveSpreadsheet();
-  const main   = ss.getSheetByName(HYB.MAIN_SHEET);
-  const target = getTargetSheet_(targetSheetName);   // ← 외부 시트 지원
-  const layout = HYB.TARGET_LAYOUT[targetSheetName];
-  if (!target || !layout) { log_('ERROR','Target missing',{targetSheetName}); return; }
-
-  const resolved = resolveRowForBase_(target, layout, {
-    roundNow: String(main.getRange(row, HYB.COL.ROUND).getValue() || '').trim(),
-    subject, sendDateStr
-  });
-  if (!resolved) { log_('INFO','Link upsert: no row to update',{targetSheetName}); return; }
-
-  target.getRange(resolved, layout.linkCol).setValue(link || '');
-
-  const roundVal = String(target.getRange(resolved, layout.A_round).getValue() || '').trim();
+  const roundVal = String(target.getRange(rowIndex, layout.A_round).getValue() || '').trim();
   main.getRange(row, HYB.COL.ROUND).setValue(roundVal);
   const execNow = main.getRange(row, HYB.COL.EXECUTOR).getValue();
   if (execNow) main.getRange(row, HYB.COL.EXECUTOR_CACHE).setValue(execNow);
+
+  _ensureSlots_(target, targetSheetName, layout, false);
+  log_('INFO','Base upsert OK',{ targetSheetName, rowIndex, roundVal, id: key.id });
 }
 
 // ============== 비건뉴스 전용 업서트 ==============
-function handleVeganUpsert_({ row, subject, sendDateStr, media, material }) {
+function handleVeganUpsert_({ row, subject, sendDateStr, media, material, link, task, roundTrusted }) {
   const ss    = SpreadsheetApp.getActiveSpreadsheet();
   const main  = ss.getSheetByName(HYB.MAIN_SHEET);
   const vSheet= ss.getSheetByName('비건뉴스');
   if (!vSheet) { log_('ERROR','비건뉴스 시트 없음'); return; }
 
-  const section   = getVeganSection_(media, material);
-  const layout    = VEGAN_SECTION_LAYOUT[section];
-  const roundNow  = String(main.getRange(row, HYB.COL.ROUND).getValue() || '').trim();
-  const targetRow = resolveVeganRow_(vSheet, layout, roundNow, subject, sendDateStr);
+  const section = getVeganSection_(media, material);
+  const layout  = VEGAN_SECTION_LAYOUT[section];
+  let key = { id: task.id, dup: task.dup, mainRow: row, roundTrusted, subject, sendDateStr };
 
-  if (!targetRow) {
-    log_('WARN','Vegan upsert: 빈 슬롯 없음',{section}); return;
+  // 섹션이 바뀐 경우(같은 비건 실행사 안에서 매체사·소재 변경): 예전 섹션의 이 업무 칸은 반려 처리
+  for (const [sec, lay] of Object.entries(VEGAN_SECTION_LAYOUT)) {
+    if (sec === section) continue;
+    const S2 = _readSlots_(vSheet, lay);
+    const j = _findTaskSlot_(S2, lay, { ...key, roundTrusted: '' });
+    if (j >= 0 && S2.tags[j] && _cellStr_(S2.vals, j, lay.E_flag) !== '반려') {
+      vSheet.getRange(_rowOf_(j), lay.E_flag).setValue('반려');
+      key.roundTrusted = '';
+      log_('INFO','Vegan 섹션 변경 → 이전 섹션 반려',{ from: sec, to: section, row: _rowOf_(j) });
+    }
   }
+
+  const S = _readSlots_(vSheet, layout);
+  let i = _findTaskSlot_(S, layout, key);
+  if (i < 0 && task.dup) key = { ...key, id: _regenTaskId_(main, row), dup: false, roundTrusted: '' };
+  if (i < 0) i = _veganNewSlotIdx_(layout, S, subject);
+  if (i < 0) { log_('WARN','Vegan upsert: 빈 슬롯 없음',{section}); return; }
+  const targetRow = _rowOf_(i);
 
   vSheet.getRange(targetRow, layout.B_subject).setValue(subject || '');
   vSheet.getRange(targetRow, layout.C_date).setValue(normalizeDateString_(sendDateStr) || '');
+  if (link) vSheet.getRange(targetRow, layout.D_link).setValue(link);
+  _setTag_(vSheet, targetRow, layout.B_subject, key.id, row);
 
-  // 반려 슬롯 재사용 시 E열(반려 플래그) → '대체완료'로 변경
-  const eFlag = String(vSheet.getRange(targetRow, layout.E_flag).getValue() || '').trim();
+  // 반려 슬롯 재사용 시 진행현황 → '대체완료' (같은 업무가 돌아온 경우는 반려 표시만 지움)
+  const eFlag = _cellStr_(S.vals, i, layout.E_flag);
   if (eFlag === '반려') {
-    vSheet.getRange(targetRow, layout.E_flag).setValue('대체완료');
+    const own = S.tags[i] && S.tags[i].id === key.id;
+    vSheet.getRange(targetRow, layout.E_flag).setValue(own ? '' : '대체완료');
   }
 
-  // 회차 역동기화 (L열)
   const roundVal = String(vSheet.getRange(targetRow, layout.A_round).getValue() || '').trim();
-  if (roundVal) main.getRange(row, HYB.COL.ROUND).setValue(roundVal);
-  main.getRange(row, HYB.COL.EXECUTOR_CACHE).setValue(
-    main.getRange(row, HYB.COL.EXECUTOR).getValue()
-  );
-
-  log_('INFO','Vegan upsert OK',{section, targetRow, roundVal, eFlag});
+  main.getRange(row, HYB.COL.ROUND).setValue(roundVal);
+  main.getRange(row, HYB.COL.EXECUTOR_CACHE).setValue(main.getRange(row, HYB.COL.EXECUTOR).getValue());
+  log_('INFO','Vegan upsert OK',{section, targetRow, roundVal, eFlag, id: key.id});
 }
 
-function handleVeganLinkUpsert_({ row, subject, sendDateStr, link, media, material }) {
-  const ss    = SpreadsheetApp.getActiveSpreadsheet();
-  const main  = ss.getSheetByName(HYB.MAIN_SHEET);
-  const vSheet= ss.getSheetByName('비건뉴스');
-  if (!vSheet) { log_('ERROR','비건뉴스 시트 없음'); return; }
-
-  const section   = getVeganSection_(media, material);
-  const layout    = VEGAN_SECTION_LAYOUT[section];
-  const roundNow  = String(main.getRange(row, HYB.COL.ROUND).getValue() || '').trim();
-  const targetRow = resolveVeganRow_(vSheet, layout, roundNow, subject, sendDateStr);
-
-  if (!targetRow) {
-    log_('WARN','Vegan link upsert: 행 없음',{section}); return;
-  }
-
-  vSheet.getRange(targetRow, layout.D_link).setValue(link || '');
-
-  const roundVal = String(vSheet.getRange(targetRow, layout.A_round).getValue() || '').trim();
-  if (roundVal) main.getRange(row, HYB.COL.ROUND).setValue(roundVal);
-  const execNow = main.getRange(row, HYB.COL.EXECUTOR).getValue();
-  if (execNow) main.getRange(row, HYB.COL.EXECUTOR_CACHE).setValue(execNow);
-
-  log_('INFO','Vegan link upsert OK',{section, targetRow});
+/** 비건 새 칸: 같은 주제 반려 칸 → 아무 반려 칸(수량 보전 — 대체) → 회차 있는 빈 칸 → 완전 빈 칸 */
+function _veganNewSlotIdx_(layout, S, subject) {
+  const { vals } = S;
+  for (let i = 0; i < vals.length; i++)
+    if (_cellStr_(vals, i, layout.E_flag) === '반려' && _cellStr_(vals, i, layout.B_subject) === subject) return i;
+  for (let i = 0; i < vals.length; i++)
+    if (_cellStr_(vals, i, layout.E_flag) === '반려') return i;
+  for (let i = 0; i < vals.length; i++)
+    if (_cellStr_(vals, i, layout.A_round) && !_cellStr_(vals, i, layout.B_subject)) return i;
+  for (let i = 0; i < vals.length; i++)
+    if (!_cellStr_(vals, i, layout.A_round) && !_cellStr_(vals, i, layout.B_subject)) return i;
+  return -1;
 }
 
-/** 비건뉴스 행 탐색:
- *  1) A열(회차) 일치
- *  2) 반려 슬롯 우선 (E열='반려') ← 수량 보전을 위해 반려 회차 재활용
- *  3) 주제+날짜 일치
- *  4) 빈 슬롯 (회차 있고 주제 없음)
- *  5) 완전 빈 행 (회차도 주제도 없음)
- */
-function resolveVeganRow_(sheet, layout, roundNow, subject, sendDateStr) {
-  const last   = sheet.getLastRow(); if (last < 2) return null;
-  const maxCol = Math.max(layout.A_round, layout.B_subject, layout.C_date, layout.D_link, layout.E_flag);
-  const vals   = sheet.getRange(2, 1, last - 1, maxCol).getValues();
-
-  // 1) 회차로 찾기 (기존 회차가 지정된 경우 최우선) — B열 주제 있는 슬롯만 선택
-  if (roundNow) {
-    for (let i = vals.length - 1; i >= 0; i--) {
-      const round = String(vals[i][layout.A_round - 1]);
-      const sub   = String(vals[i][layout.B_subject - 1] || '').trim();
-      if (round === String(roundNow) && sub) return i + 2;
+/** 비건 반려: 이 업무 칸(고유번호 → 회차+주제 → 주제+날짜)만. 못 찾으면 아무것도 안 함 */
+function applyVeganReject_(vSheet, media, material, key) {
+  const order = [getVeganSection_(media, material), ...Object.keys(VEGAN_SECTION_LAYOUT)];
+  for (const section of order) {
+    const layout = VEGAN_SECTION_LAYOUT[section];
+    const S = _readSlots_(vSheet, layout);
+    const i = _findTaskSlot_(S, layout, section === order[0] ? key : { ...key, roundTrusted: '' });
+    if (i < 0) continue;
+    if (_cellStr_(S.vals, i, layout.E_flag) !== '대체완료') {
+      vSheet.getRange(_rowOf_(i), layout.E_flag).setValue('반려');
+      log_('INFO','Vegan reject OK',{section, row: _rowOf_(i)});
     }
-  }
-  // 2) 반려 슬롯 우선: 같은 주제의 반려 슬롯 먼저 → 없으면 아무 반려 슬롯
-  // ★ 버그수정: 주제 미매칭으로 다른 건 반려 슬롯에 덮어쓰는 오탐 방지
-  for (let i = 0; i < vals.length; i++) {
-    const sub  = String(vals[i][layout.B_subject - 1] || '').trim();
-    const flag = String(vals[i][layout.E_flag - 1]    || '').trim();
-    if (flag === '반려' && sub === subject) return i + 2;
-  }
-  // 같은 주제 반려 슬롯 없을 때만 아무 반려 슬롯 (기존 동작 보존)
-  for (let i = 0; i < vals.length; i++) {
-    const flag = String(vals[i][layout.E_flag - 1] || '').trim();
-    if (flag === '반려') return i + 2;
-  }
-  // 3) 주제+날짜 일치
-  const d = normalizeDateString_(sendDateStr);
-  for (let i = 0; i < vals.length; i++) {
-    const sub = String(vals[i][layout.B_subject - 1] || '').trim();
-    const dt  = normalizeDateString_(vals[i][layout.C_date - 1]);
-    if (sub === subject && dt === d) return i + 2;
-  }
-  // 4) 빈 슬롯: 회차 있고 주제 없는 행
-  for (let i = 0; i < vals.length; i++) {
-    const round = String(vals[i][layout.A_round - 1] || '').trim();
-    const sub   = String(vals[i][layout.B_subject - 1] || '').trim();
-    if (round && !sub) return i + 2;
-  }
-  // 5) 완전 빈 행: 회차도 주제도 없는 행 (새로 추가된 빈 행)
-  for (let i = 0; i < vals.length; i++) {
-    const round = String(vals[i][layout.A_round - 1] || '').trim();
-    const sub   = String(vals[i][layout.B_subject - 1] || '').trim();
-    if (!round && !sub) return i + 2;
-  }
-  return null;
-}
-
-/** 비건뉴스 반려 적용: 소재 기준으로 섹션 특정 후 해당 섹션 E열에 '반려' 표기 */
-function applyVeganReject_(vSheet, media, material, roundNow, subject, sendDateStr) {
-  // handleVeganUpsert_ 와 동일하게 소재로 섹션 결정 → 섹션 간 오탐 방지
-  const section  = getVeganSection_(media, material);
-  const layout   = VEGAN_SECTION_LAYOUT[section];
-  const targetRow = resolveVeganRow_(vSheet, layout, roundNow, subject, sendDateStr);
-  if (!targetRow) {
-    log_('WARN','Vegan reject: 행 없음',{section, roundNow, subject});
     return;
   }
-  const flagVal = String(vSheet.getRange(targetRow, layout.E_flag).getValue() || '').trim();
-  if (flagVal !== '대체완료') {  // 이미 완료된 건은 건드리지 않음
-    vSheet.getRange(targetRow, layout.E_flag).setValue('반려');
-    log_('INFO','Vegan reject OK',{section, targetRow});
-  }
-}
-
-// 기본/링크에서 사용할 대상행 탐색
-function resolveRowForBase_(sheet, layout, { roundNow, subject, sendDateStr }) {
-  const last   = sheet.getLastRow(); if (last < 2) return null;
-  const maxCol = Math.max(layout.G_cost, layout.H_flag || layout.G_cost);
-  const vals   = sheet.getRange(2, 1, last - 1, maxCol).getValues();
-
-  // 1) 회차로 찾기 — B열에 주제가 있는 슬롯만 (빈 슬롯을 회차로 잘못 선택 방지)
-  // 회차 탐색은 "이미 배정된 슬롯 업데이트" 용도. 빈 슬롯은 step 3에서 처리.
-  if (roundNow) {
-    for (let i = vals.length - 1; i >= 0; i--) {
-      const round = String(vals[i][layout.A_round - 1]);
-      const sub   = String(vals[i][layout.B_subject - 1] || '').trim();
-      if (round === String(roundNow) && sub) return i + 2;
-    }
-  }
-  // 2) (주제+날짜) 완전일치
-  const d = normalizeDateString_(sendDateStr);
-  const exact = [];
-  for (let i = 0; i < vals.length; i++) {
-    const sub = String(vals[i][layout.B_subject - 1] || '').trim();
-    const dt  = normalizeDateString_(vals[i][layout.C_date - 1]);
-    if (sub === subject && dt === d) exact.push(i + 2);
-  }
-  if (exact.length) return exact[exact.length - 1];
-
-  // 3) 빈 슬롯(B empty)
-  for (let i = 0; i < vals.length; i++) {
-    const sub = String(vals[i][layout.B_subject - 1] || '').trim();
-    if (!sub) return i + 2;
-  }
-  return null;
+  log_('WARN','Vegan reject: 행 없음',{ subject: key.subject });
 }
 
 function applyBaseFields_(sheet, layout, rowIndex, { subject, sendDateStr, media, material, cost }) {
@@ -432,215 +475,79 @@ function applyBaseFields_(sheet, layout, rowIndex, { subject, sendDateStr, media
   if (layout.H_flag) sheet.getRange(rowIndex, layout.H_flag).setValue('');
 }
 
+/** 실행사 시트에서 이 업무 칸을 찾아 반려 규칙 적용 (못 찾으면 아무 칸도 건드리지 않음) */
+function _rejectTaskSlot_(sheetName, key, media, material) {
+  const sheet = getTargetSheet_(sheetName);
+  if (!sheet) { log_('ERROR','반려: 실행사 시트 열기 실패',{sheetName}); return; }
+  if (sheetName === '비건뉴스') { applyVeganReject_(sheet, media, material, key); return; }
+  const layout = HYB.TARGET_LAYOUT[sheetName];
+  if (!layout) { log_('ERROR','반려: 레이아웃 없음',{sheetName}); return; }
+  const S = _readSlots_(sheet, layout);
+  const i = _findTaskSlot_(S, layout, key);
+  if (i < 0) { log_('WARN','Reject skipped: 행 없음',{ sheetName, subject: key.subject, round: key.roundTrusted }); return; }
+  applyRejectRule_(sheetName, layout, sheet, _rowOf_(i));
+}
+
 // ============== 최종 반려 (재배정 없음) ==============
 /**
  * E열(진행상태) = '반려' 입력 시 호출
  * - M열(링크) 있으면 안전장치로 스킵
  * - 업무시트 N열(매출), O열(원가) → 0 처리
- * - J열 실행사 시트에서 해당 슬롯 반려 처리 (재배정 없음)
- * - EXECUTOR_CACHE 초기화
+ * - J열 실행사 시트에서 이 업무 칸만 반려 처리 (재배정 없음)
+ * - EXECUTOR_CACHE·ROUND 초기화 (고유번호는 유지 → 같은 실행사로 다시 오면 그 반려 칸 재사용)
  */
-function handleFinalReject_({ row, sheet, subject, sendDateStr, media, material, roundNow, execNow }) {
-  // 1. M열(링크) 체크 — 링크 있으면 이미 기사 나간 상태 → 스킵
+function handleFinalReject_({ row, sheet, subject, sendDateStr, media, material, roundNow, execNow, execCache, task }) {
   const mVal = String(sheet.getRange(row, HYB.COL.LINK).getValue() || '').trim();
-  if (mVal) {
-    log_('WARN', '최종반려 스킵: M열 링크 존재', { row });
-    return;
-  }
+  if (mVal) { log_('WARN', '최종반려 스킵: M열 링크 존재', { row }); return; }
 
-  // 2. 업무시트 N열(매출) = 0, O열(원가) = 0
   sheet.getRange(row, HYB.COL.SALES).setValue(0);  // N열 수식 덮어씀
   sheet.getRange(row, HYB.COL.COST).setValue(0);   // O열
 
-  // 3. 실행사 없으면 N/O 처리만 하고 종료
-  if (!execNow) {
-    log_('INFO', '최종반려: 실행사 없음 → N/O만 0처리', { row });
-    return;
-  }
-
-  // 4. 실행사 시트 반려 처리 (기존 규칙 그대로, 재배정 없음)
+  if (!execNow) { log_('INFO', '최종반려: 실행사 없음 → N/O만 0처리', { row }); return; }
   const sheetName = HYB.EXECUTOR_MAP[execNow];
   if (!sheetName) {
     log_('WARN', '최종반려: 실행사 매핑 없음', { execNow, validKeys: Object.keys(HYB.EXECUTOR_MAP).join(',') });
     return;
   }
 
-  log_('INFO', '최종반려: 실행사 시트 탐색 시작', { execNow, sheetName, roundNow, subject, sendDateStr });
+  const roundTrusted = (execCache && execCache === execNow) ? roundNow : '';
+  _rejectTaskSlot_(sheetName, { id: task.id, dup: task.dup, mainRow: row, roundTrusted, subject, sendDateStr }, media, material);
 
-  if (sheetName === '비건뉴스') {
-    const vSheet = getTargetSheet_(sheetName);
-    if (vSheet) applyVeganReject_(vSheet, media, material, roundNow, subject, sendDateStr);
-  } else {
-    const targetSheet  = getTargetSheet_(sheetName);
-    const targetLayout = HYB.TARGET_LAYOUT[sheetName];
-    if (!targetSheet) { log_('ERROR', '최종반려: 실행사 시트 열기 실패', { sheetName }); return; }
-    if (!targetLayout) { log_('ERROR', '최종반려: 레이아웃 없음', { sheetName }); return; }
-    const targetRow = resolveRowForRejectPrev_(targetSheet, targetLayout, { roundNow, subject, sendDateStr }, sheetName);
-    log_('INFO', '최종반려: targetRow 탐색 결과', { sheetName, targetRow });
-    applyRejectRule_(sheetName, targetLayout, targetSheet, targetRow);
-  }
-
-  // 5. EXECUTOR_CACHE + ROUND 초기화
-  // ROUND도 함께 초기화: 이후 J열 실행사 변경 시 이전 회차로 잘못 탐색하는 버그 방지
   sheet.getRange(row, HYB.COL.EXECUTOR_CACHE).setValue('');
   sheet.getRange(row, HYB.COL.ROUND).setValue('');
-
   log_('INFO', '최종반려 완료', { row, executor: execNow, sheetName });
 }
 
 // ============== 반려 + 이관 ==============
-function handleRejectAndReassign_({ row, subject, sendDateStr, media, material, cost, link, oldExecutor, newExecutor, roundNow }) {
-  const ss   = SpreadsheetApp.getActiveSpreadsheet();
-  const main = ss.getSheetByName(HYB.MAIN_SHEET);
-
+function handleRejectAndReassign_({ row, subject, sendDateStr, media, material, cost, link, oldExecutor, newExecutor, roundNow, task }) {
+  const main = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HYB.MAIN_SHEET);
   const prevName = HYB.EXECUTOR_MAP[oldExecutor];
   const nextName = HYB.EXECUTOR_MAP[newExecutor];
-  if (!prevName) { log_('WARN','Reject: oldExecutor 매핑 없음',{oldExecutor}); return; }
 
-  const prevSheet  = getTargetSheet_(prevName);      // ← 외부 시트 지원
-  const prevLayout = HYB.TARGET_LAYOUT[prevName];  // 비건뉴스면 undefined
-
-  // ── 1) 이전 시트에서 반려 적용 ──────────────────────────────
-  if (prevName === '비건뉴스') {
-    if (prevSheet) applyVeganReject_(prevSheet, media, material, roundNow, subject, sendDateStr);
+  // ── 1) 이전 시트에서 이 업무 칸 반려 (L열 회차는 이전 실행사 것이므로 이전 시트에서만 사용) ──
+  if (prevName) {
+    _rejectTaskSlot_(prevName, { id: task.id, dup: task.dup, mainRow: row, roundTrusted: roundNow, subject, sendDateStr }, media, material);
   } else {
-    if (prevSheet && prevLayout) {
-      const prevRow = resolveRowForRejectPrev_(prevSheet, prevLayout, { roundNow, subject, sendDateStr }, prevName);
-      applyRejectRule_(prevName, prevLayout, prevSheet, prevRow);
-    }
+    log_('WARN','Reject: oldExecutor 매핑 없음',{oldExecutor});
   }
 
-  // ── 2) 새 시트 배정이 없으면 (실행사 제거) 종료 ─────────────
+  // 이전 실행사 회차는 여기서 항상 비움
+  main.getRange(row, HYB.COL.ROUND).setValue('');
+
+  // ── 2) 새 실행사가 없거나 목록에 없음 → 반려만 하고 종료 (L열·실행사기억 모두 비움) ──
   if (!nextName) {
-    // 캐시 초기화
     main.getRange(row, HYB.COL.EXECUTOR_CACHE).setValue('');
     log_('INFO','Reject only (no reassign)',{prevName});
     return;
   }
 
-  // ── 3) 새 시트에 배정 ────────────────────────────────────────
-  // 이전 실행사 회차 잔존 방지: 새 실행사 배정 전 L열 초기화
-  main.getRange(row, HYB.COL.ROUND).setValue('');
-  if (nextName === '비건뉴스') {
-    // 비건뉴스로 이관: 섹션 결정 후 빈 슬롯에 배정
-    handleVeganUpsert_({ row, subject, sendDateStr, media, material });
-    if (link) handleVeganLinkUpsert_({ row, subject, sendDateStr, link, media, material });
-  } else {
-    const nextSheet  = getTargetSheet_(nextName);   // ← 외부 시트 지원
-    const nextLayout = HYB.TARGET_LAYOUT[nextName];
-    if (!nextSheet || !nextLayout) { log_('ERROR','Next sheet/layout missing',{nextName}); return; }
-
-    const nextRow = resolveRowForAssignNext_(nextSheet, nextLayout, { subject, sendDateStr });
-    if (!nextRow) { log_('INFO','Next: 빈 슬롯 없음',{nextName}); return; }
-
-    applyBaseFields_(nextSheet, nextLayout, nextRow, { subject, sendDateStr, media, material, cost });
-    // 반려 슬롯 재활용 시 H열 반려 표시 초기화
-    if (nextLayout.H_flag) nextSheet.getRange(nextRow, nextLayout.H_flag).setValue('');
-    if (link) nextSheet.getRange(nextRow, nextLayout.linkCol).setValue(link);
-
-    // 회차 동기화
-    // ★ 버그수정: newRound가 없어도 L열을 반드시 업데이트 → 이전 실행사 회차 잔존 방지
-    const newRound = String(nextSheet.getRange(nextRow, nextLayout.A_round).getValue() || '').trim();
-    main.getRange(row, HYB.COL.ROUND).setValue(newRound);
-  }
+  // ── 3) 새 시트에 배정 (이 업무의 같은 구간 반려 칸이 있으면 그 자리, 없으면 새 칸) ──
+  const ctx = { row, subject, sendDateStr, media, material, cost, link, task, roundTrusted: '' };
+  if (nextName === '비건뉴스') handleVeganUpsert_(ctx);
+  else handleBaseUpsert_({ ...ctx, targetSheetName: nextName });
 
   main.getRange(row, HYB.COL.EXECUTOR_CACHE).setValue(newExecutor);
   log_('INFO','Reject+Reassign done',{from: prevName, to: nextName});
-}
-
-// 이전 시트: 회차 → (주제+날짜) → 주제만(폴백)
-// sheetName: 플래나 송출/한미마 송출/이디엘 송출은 날짜 기준 최신 행 선택
-function resolveRowForRejectPrev_(sheet, layout, { roundNow, subject, sendDateStr }, sheetName) {
-  const last   = sheet.getLastRow(); if (last < 2) return null;
-  const maxCol = Math.max(layout.G_cost, layout.H_flag || layout.G_cost);
-  const vals   = sheet.getRange(2, 1, last - 1, maxCol).getValues();
-
-  const useDateSort = ['플래나 송출', '한미마 송출', '이디엘 송출'].includes(sheetName);
-
-  // 1) 회차 일치 + B열(주제) 있는 행만 — 빈 슬롯 잘못 반려 방지
-  if (roundNow) {
-    const cands = [];
-    for (let i = 0; i < vals.length; i++) {
-      const sub = String(vals[i][layout.B_subject - 1] || '').trim();
-      if (String(vals[i][layout.A_round - 1]) === String(roundNow) && sub) cands.push(i + 2);
-    }
-    if (cands.length) {
-      return useDateSort ? _latestByDate_(cands, vals, layout.C_date) : cands[cands.length - 1];
-    }
-    log_('INFO', 'resolveRowForRejectPrev_: 회차 탐색 실패', { roundNow, subject });
-  }
-
-  // 2) 주제+날짜 완전일치
-  const d = normalizeDateString_(sendDateStr);
-  const exact = [];
-  for (let i = 0; i < vals.length; i++) {
-    const sub = String(vals[i][layout.B_subject - 1] || '').trim();
-    const dt  = normalizeDateString_(vals[i][layout.C_date - 1]);
-    if (sub === subject && dt === d) exact.push(i + 2);
-  }
-  if (exact.length) return exact[exact.length - 1];
-
-  // 3) 폴백: 주제만 일치 — 플래나/한미마/이디엘은 날짜 기준 최신, 나머지는 마지막 행
-  const subOnly = [];
-  for (let i = 0; i < vals.length; i++) {
-    const sub = String(vals[i][layout.B_subject - 1] || '').trim();
-    if (sub === subject) subOnly.push(i + 2);
-  }
-  if (subOnly.length) {
-    const result = useDateSort ? _latestByDate_(subOnly, vals, layout.C_date) : subOnly[subOnly.length - 1];
-    log_('INFO', 'resolveRowForRejectPrev_: 주제만 매칭(폴백)', { subject, matchedRow: result });
-    return result;
-  }
-
-  log_('WARN', 'resolveRowForRejectPrev_: 행 없음', { roundNow, subject, sendDateStr });
-  return null;
-}
-
-// C열(날짜) 기준 가장 최근 행 반환
-function _latestByDate_(rowNums, vals, cDateCol) {
-  let best = rowNums[0];
-  let bestDate = normalizeDateString_(vals[rowNums[0] - 2][cDateCol - 1]);
-  for (let i = 1; i < rowNums.length; i++) {
-    const dt = normalizeDateString_(vals[rowNums[i] - 2][cDateCol - 1]);
-    if (dt > bestDate) { bestDate = dt; best = rowNums[i]; }
-  }
-  return best;
-}
-
-// 새 시트: 반려 슬롯 우선 → 빈 슬롯 → (주제+날짜)
-function resolveRowForAssignNext_(sheet, layout, { subject, sendDateStr }) {
-  const last   = sheet.getLastRow(); if (last < 2) return null;
-  const maxCol = Math.max(layout.G_cost, layout.H_flag || layout.G_cost);
-  const vals   = sheet.getRange(2, 1, last - 1, maxCol).getValues();
-
-  // 1) 같은 subject의 반려된 슬롯 우선
-  if (layout.H_flag) {
-    for (let i = 0; i < vals.length; i++) {
-      const sub  = String(vals[i][layout.B_subject - 1] || '').trim();
-      const flag = String(vals[i][layout.H_flag - 1]    || '').trim();
-      if (sub === subject && flag === '반려') return i + 2;
-    }
-  }
-  for (let i = 0; i < vals.length; i++) {
-    const sub  = String(vals[i][layout.B_subject - 1] || '').trim();
-    const cost = String(vals[i][layout.G_cost - 1]    || '').trim();
-    if (sub === subject && cost === '반려') return i + 2;
-  }
-  // 2) 빈 슬롯
-  for (let i = 0; i < vals.length; i++) {
-    const sub = String(vals[i][layout.B_subject - 1] || '').trim();
-    if (!sub) return i + 2;
-  }
-  // 3) (주제+날짜) 완전일치
-  const d = normalizeDateString_(sendDateStr);
-  const exact = [];
-  for (let i = 0; i < vals.length; i++) {
-    const sub = String(vals[i][layout.B_subject - 1] || '').trim();
-    const dt  = normalizeDateString_(vals[i][layout.C_date - 1]);
-    if (sub === subject && dt === d) exact.push(i + 2);
-  }
-  if (exact.length) return exact[exact.length - 1];
-  return null;
 }
 
 // ─── 반려 규칙 (시트별) ────────────────────────────────────────
@@ -658,19 +565,20 @@ function applyRejectRule_(sheetName, layout, sheet, rowIndex) {
       sheet.getRange(rowIndex, layout.G_cost).setValue('반려');
       break;
     case '공감신문':
-      // ★ A열(회차)만 남기고 B~H 전부 삭제 → 새 건 배정
+      // ★ A열(회차)만 남기고 B~H 전부 삭제 → 새 건 배정 (고유번호 메모도 지움 → 빈 칸으로 재사용)
       const roundBackup = sheet.getRange(rowIndex, layout.A_round).getValue();
       const lastCol     = layout.H_flag || layout.G_cost;
       for (let c = layout.B_subject; c <= lastCol; c++) {
         sheet.getRange(rowIndex, c).setValue('');
       }
-      // A열은 반드시 유지 (혹시 지워졌을 경우 복원)
+      sheet.getRange(rowIndex, layout.B_subject).setNote('');
       sheet.getRange(rowIndex, layout.A_round).setValue(roundBackup);
       break;
     default:
       log_('WARN','Reject: 알 수 없는 시트',{sheetName});
   }
 }
+
 
 // ============== 공통 유틸 ==============
 function normalizeDateString_(val) {
@@ -733,48 +641,63 @@ function listInstalledTriggers() {
   SpreadsheetApp.getUi().alert('등록된 트리거:\n' + (info.join('\n') || '없음'));
 }
 
-// ============== 회차 자동 리셋 ==============
+// ============== 회차 자동 갱신·채우기 ==============
 
 /**
- * 빈 슬롯(B_subject 비어있는 행)의 A_round를 1부터 재번호화.
- * 이미 사용된 행(B_subject 값 있음)은 절대 건드리지 않음.
- *
- * @param {Sheet}   sheet      - 대상 시트
- * @param {object}  layout     - TARGET_LAYOUT 항목
- * @param {number}  [startRow=2] - 이 행(포함)부터 탐색 시작 (한미마 충전 시 충전행+1)
+ * [2026-10-16] 빈 칸 회차 번호 관리 (실행사별 칸 수: SLOT_CFG)
+ *  - reset=true (플래나 매월·이디엘 매주 월요일·한미마 충전): 마지막 사용 칸 아래 빈 칸을 1부터 다시 매기고, target 칸까지 확보
+ *  - reset=false (배정할 때마다): 빈 칸 번호를 첫 빈 칸 번호부터 순서대로 정리(예전 30칸 제한으로 남은 '51,52…' 같은 튀는 번호 바로잡음),
+ *    남은 칸이 SLOT_LOW 이하이면 target 칸만큼 이어 붙임
+ *  - 공감신문은 cap(58) 넘게 번호를 만들지 않음 / 비건뉴스는 대상 아님
+ *  - 사용된 칸(B열 주제 있음)은 절대 건드리지 않음. 시트 줄이 모자라면 줄 추가
  */
+function _ensureSlots_(sheet, sheetName, layout, reset) {
+  const cfg = SLOT_CFG[sheetName];
+  if (!cfg || !sheet || !layout) return;
+  const aCol = layout.A_round, bCol = layout.B_subject;
+  const last = Math.max(sheet.getLastRow(), DATA_START_ROW);
+  const vals = sheet.getRange(DATA_START_ROW, 1, last - DATA_START_ROW + 1, Math.max(aCol, bCol)).getValues();
+
+  let lastUsed = -1;
+  for (let i = vals.length - 1; i >= 0; i--) if (String(vals[i][bCol - 1] || '').trim()) { lastUsed = i; break; }
+  const tailStart = lastUsed + 1;                       // vals 인덱스
+  const tailCount = vals.length - tailStart;
+  const num = v => { const n = parseInt(String(v || '').replace(/[^\d]/g, ''), 10); return isNaN(n) ? 0 : n; };
+  const lastUsedRound = lastUsed >= 0 ? num(vals[lastUsed][aCol - 1]) : 0;
+
+  let n0;
+  if (reset) n0 = 1;
+  else n0 = (tailCount > 0 && num(vals[tailStart][aCol - 1])) || (lastUsedRound + 1);
+
+  let want = tailCount;
+  if (reset) want = Math.max(tailCount, cfg.target);
+  else if (tailCount <= SLOT_LOW) want = tailCount + cfg.target;
+  if (cfg.cap) want = Math.min(want, Math.max(0, cfg.cap - n0 + 1));
+  if (want <= 0) return;
+
+  const firstRow = DATA_START_ROW + tailStart;
+  const needLast = firstRow + want - 1;
+  const maxRows  = sheet.getMaxRows();
+  if (needLast > maxRows) sheet.insertRowsAfter(maxRows, needLast - maxRows);
+
+  const nums = [];
+  for (let k = 0; k < want; k++) nums.push([n0 + k]);
+  const cur = sheet.getRange(firstRow, aCol, want, 1).getValues();
+  const changed = cur.some((r, k) => num(r[0]) !== nums[k][0] || String(r[0]).trim() === '');
+  if (changed) sheet.getRange(firstRow, aCol, want, 1).setValues(nums);
+
+  if (changed || reset) log_('INFO', '_ensureSlots_', { sheetName, reset, firstRow, from: n0, to: n0 + want - 1, before: tailCount });
+}
+
+/** (예전 함수 — 호환용) 빈 칸 회차 재번호화 → _ensureSlots_ 로 대체 */
 function _renumberEmptySlots_(sheet, layout, startRow) {
-  const last = sheet.getLastRow();
-  const aCol = layout.A_round;
-  const bCol = layout.B_subject;
-  const from = startRow || 2;
-  if (last < from) return;
-
-  const count = last - from + 1;
-  const vals  = sheet.getRange(from, 1, count, Math.max(aCol, bCol)).getValues();
-
-  let counter = 0;
-  const updates = [];
-  for (let i = 0; i < vals.length; i++) {
-    const sub = String(vals[i][bCol - 1] || '').trim();
-    if (!sub) {
-      counter++;
-      updates.push({ rowIndex: from + i, newNum: counter });
-    }
-  }
-
-  // 일괄 쓰기
-  for (const { rowIndex, newNum } of updates) {
-    sheet.getRange(rowIndex, aCol).setValue(newNum);
-  }
-
-  log_('INFO', '_renumberEmptySlots_', { from, totalUpdated: updates.length, lastNum: counter });
+  const name = Object.keys(HYB.TARGET_LAYOUT).find(k => HYB.TARGET_LAYOUT[k] === layout) || '';
+  _ensureSlots_(sheet, name, layout, true);
 }
 
 /**
  * 플래나 월 리셋 체크:
- * 마지막으로 배정된 행의 날짜가 현재 월과 다르면 빈 슬롯 재번호화.
- * 아직 배정된 행이 없을 때도 재번호화.
+ * 마지막으로 배정된 행의 날짜가 현재 월과 다르면 회차 갱신(1부터 + 150칸 확보).
  */
 function _checkPlannerMonthReset_(sheet, layout) {
   const now      = new Date();
@@ -791,14 +714,12 @@ function _checkPlannerMonthReset_(sheet, layout) {
   const vals = sheet.getRange(2, 1, last - 1, maxC).getValues();
 
   // 마지막으로 사용된 행(B열 있음)의 날짜 확인
-  // ★ 버그수정: new Date('yyyy.MM.dd') 는 파싱 실패 → normalizeDateString_ 활용으로 교체
   let lastYear = null, lastMonth = null;
   for (let i = vals.length - 1; i >= 0; i--) {
     const sub     = String(vals[i][bCol - 1] || '').trim();
     const dateVal = vals[i][cCol - 1];
     if (sub && dateVal) {
       const normalized = normalizeDateString_(dateVal);
-      // normalizeDateString_ 반환값은 'yyyy.MM.dd' 형식이므로 직접 분리
       const parts = (normalized || '').split('.');
       if (parts.length === 3 && !isNaN(parseInt(parts[0], 10))) {
         lastYear  = parseInt(parts[0], 10);
@@ -814,14 +735,14 @@ function _checkPlannerMonthReset_(sheet, layout) {
     lastMonth !== nowMonth;
 
   if (needReset) {
-    _renumberEmptySlots_(sheet, layout, 2);
+    _ensureSlots_(sheet, '플래나 송출', layout, true);
     log_('INFO', '플래나 월 리셋', { nowYear, nowMonth, lastYear, lastMonth });
   }
 }
 
 /**
  * 이디엘 주간 리셋 — 매주 월요일 오전 6시 트리거로 실행.
- * 이디엘 송출 시트의 빈 슬롯 A열을 1부터 재번호화.
+ * 이디엘 송출 시트의 빈 칸 회차를 1부터 + 15칸 확보.
  */
 function resetIdelWeekly_() {
   const ss    = SpreadsheetApp.getActiveSpreadsheet();
@@ -830,8 +751,7 @@ function resetIdelWeekly_() {
     log_('WARN', 'resetIdelWeekly_: 이디엘 송출 시트 없음');
     return;
   }
-  const layout = HYB.TARGET_LAYOUT['이디엘 송출'];
-  _renumberEmptySlots_(sheet, layout, 2);
+  _ensureSlots_(sheet, '이디엘 송출', HYB.TARGET_LAYOUT['이디엘 송출'], true);
   log_('INFO', '이디엘 주간 리셋 완료');
 }
 
