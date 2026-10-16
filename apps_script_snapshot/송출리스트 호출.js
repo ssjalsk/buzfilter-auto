@@ -57,7 +57,7 @@ const HYB = {
 
   LOG_ENABLED: true,
   STABILIZE_DELAY_MS: 5000,
-  LOCK_WAIT_MS: 20000
+  LOCK_WAIT_MS: 60000   // [2026-10-16] 20초 → 60초 (연속 입력 때 대기열이 길어 동기화를 포기하던 문제)
 };
 
 /**
@@ -280,8 +280,16 @@ function HYB_Trigger(e) {
     const isIJK = [HYB.COL.MEDIA, HYB.COL.EXECUTOR, HYB.COL.MATERIAL].includes(col);
     if (isIJK) Utilities.sleep(HYB.STABILIZE_DELAY_MS);
 
-    const lock = LockService.getScriptLock();
+    // [2026-10-16] 송출 동기화 전용 잠금(문서 잠금) — 정산 자동매칭(스크립트 잠금)이 오래 걸려도 서로 막지 않음
+    const lock = LockService.getDocumentLock();
     lock.waitLock(HYB.LOCK_WAIT_MS);
+
+    // [2026-10-16] 같은 행을 연달아 처리할 때 값이 그대로면 건너뜀 (대기열 단축)
+    const sigBefore = _hybRowSig_(sheet, row);
+    if (col !== HYB.COL.STATUS) {
+      const cache = CacheService.getScriptCache();
+      if (cache.get('hyb:' + row) === sigBefore) { lock.releaseLock(); return; }
+    }
 
     // 값 읽기
     const subject     = String(sheet.getRange(row, HYB.COL.SUBJECT).getValue()       || '').trim();
@@ -334,12 +342,21 @@ function HYB_Trigger(e) {
     } else {
       handleBaseUpsert_({ ...ctx, targetSheetName });
     }
+    try { CacheService.getScriptCache().put('hyb:' + row, _hybRowSig_(sheet, row), 21600); } catch (e) {}
     lock.releaseLock();
 
   } catch (err) {
     log_('ERROR','HYB_Trigger failed',{message: err && err.message, stack: err && err.stack});
-    try { LockService.getScriptLock().releaseLock(); } catch (e) {}
+    try { LockService.getDocumentLock().releaseLock(); } catch (e) {}
   }
+}
+
+/** 송출 동기화에 쓰이는 값 묶음 (주제·송출일·매체사·실행사·소재·회차·링크·원가·실행사기억·고유번호) */
+function _hybRowSig_(sheet, row) {
+  const v = sheet.getRange(row, 1, 1, HYB.COL.TASK_ID).getValues()[0];
+  const c = HYB.COL;
+  return JSON.stringify([c.SUBJECT, c.SEND_DATE, c.MEDIA, c.EXECUTOR, c.MATERIAL, c.ROUND, c.LINK, c.COST, c.EXECUTOR_CACHE, c.TASK_ID]
+    .map(k => String(v[k - 1] === null || v[k - 1] === undefined ? '' : v[k - 1]).trim()));
 }
 
 // ============== 기본 업서트 (플래나·한미마·이디엘·공감·외부 시트) ==============
