@@ -83,6 +83,12 @@ function onSettleEdit(e) {
   const sheet = e.range.getSheet();
   if (sheet.getName() !== '종합 정산시트') return;
 
+  // [2026-10-16] 여러 칸을 한꺼번에 입력(붙여넣기·끌어 채우기) → 행마다 처리
+  if (e.range.getNumRows() > 1 || e.range.getNumColumns() > 1) {
+    _onSettleMultiEdit_(sheet, e.range);
+    return;
+  }
+
   const row = e.range.getRow();
   const col = e.range.getColumn();
   if (row < 4) return;
@@ -142,6 +148,63 @@ function onSettleEdit(e) {
 
     console.log(`🔄 행 ${row}: 입금 매칭 시작 — 입금자: "${payer}", K열: ${amountK}, H열: ${amountH}`);
     callMatchPayment_(row, payer, amountK, amountH, 'match');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * [2026-10-16] 여러 칸 입력 처리 — 예전엔 맨 위 왼쪽 칸만 보고 나머지 행은 자동매칭이 안 됐음.
+ * 붙여넣은 범위에 E(구분)·G(입금자명)·H(미발행)·K(부가세포함) 중 하나라도 걸치면 각 행을 확인해서
+ * 아래 조건을 모두 만족하는 행만 매칭 (옛날 행이 한꺼번에 다시 처리되는 사고 방지):
+ *   - E열 '매출', G열 입금자명 있음, H 또는 K 금액 있음
+ *   - F열(광고주)·AC열(처리기록) 비어 있음 = 아직 처리 안 된 입금
+ *   - 입금일(A년·B월·C일)이 오늘 기준 최근 14일 이내
+ * 한 번에 최대 15행 (처리 시간 제한) — 넘는 행은 K열에 '금액 다시 입력' 메모
+ */
+const SETTLE_MULTI_MAX   = 15;
+const SETTLE_RECENT_DAYS = 14;
+
+function _onSettleMultiEdit_(sheet, range) {
+  const r0 = range.getRow(), c0 = range.getColumn();
+  const r1 = r0 + range.getNumRows() - 1, c1 = c0 + range.getNumColumns() - 1;
+  if (![5, 7, 8, 11].some(c => c >= c0 && c <= c1)) return;
+  const first = Math.max(r0, 4);
+  if (r1 < first) return;
+
+  const lock = LockService.getScriptLock();
+  try { lock.waitLock(120000); }
+  catch (err) { console.error(`❌ 행 ${first}~${r1}: 입금 처리 잠금 대기 초과 — 금액을 다시 입력해 주세요.`); return; }
+
+  try {
+    const vals  = sheet.getRange(first, 1, r1 - first + 1, 29).getValues();   // A~AC
+    const str   = v => String(v === null || v === undefined ? '' : v).trim();
+    const money = v => (v ? Number(String(v).replace(/[^\d.]/g, '')) || 0 : 0);
+    const digits = v => parseInt(String(v || '').replace(/[^\d]/g, ''), 10);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+
+    let done = 0, skippedOld = 0;
+    const deferred = [];
+    for (let i = 0; i < vals.length; i++) {
+      const v = vals[i], row = first + i;
+      if (str(v[4]) !== '매출' || str(v[5]) || str(v[28])) continue;      // E 매출 / F·AC 비어 있음
+      const payer = str(v[6]);
+      const amountK = money(v[10]), amountH = money(v[7]);
+      if (!payer || (amountK === 0 && amountH === 0)) continue;
+
+      const y = digits(v[0]), m = digits(v[1]), d = digits(v[2]);
+      const dt = (y && m && d) ? new Date(y, m - 1, d) : null;
+      const ageDays = dt ? (today - dt) / 86400000 : Infinity;
+      if (!dt || ageDays > SETTLE_RECENT_DAYS || ageDays < -1) { skippedOld++; continue; }
+
+      if (done >= SETTLE_MULTI_MAX) { deferred.push(row); continue; }
+      console.log(`🔄 [여러 행] 행 ${row}: 입금 매칭 시작 — 입금자: "${payer}", K열: ${amountK}, H열: ${amountH}`);
+      callMatchPayment_(row, payer, amountK, amountH, 'match');
+      done++;
+    }
+    deferred.forEach(row => sheet.getRange(row, 11).setNote(
+      '⏳ 여러 행을 한꺼번에 입력해서 자동매칭이 앞쪽 행만 처리됐습니다.\n이 행은 K(또는 H)열 금액을 한 번 다시 입력해 주세요.'));
+    console.log(`ℹ️ 여러 행 입력 ${first}~${r1}: 매칭 ${done}건, 대기(다시 입력 필요) ${deferred.length}건, 14일 지난 행 제외 ${skippedOld}건`);
   } finally {
     lock.releaseLock();
   }
