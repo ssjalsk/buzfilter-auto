@@ -85,9 +85,25 @@ function onEdit(e) {
         .filter(r => r.원가 > 0);
       if (!후보.length) return;
 
+      // [2026-10-16] 최저가 동점(서로 다른 실행사 2곳 이상) → 자동 배정하지 않고 담당자가 J열에서 선택
+      const 최저가 = Math.min(...후보.map(r => r.원가));
+      const 동점 = [...new Set(후보.filter(r => r.원가 === 최저가).map(r => _norm(r.실행사)))].filter(x => x);
+      if (동점.length >= 2) {
+        sheet.getRange(row, 10).setValue('');        // J 비움 → 선택 대기
+        sheet.getRange(row, 15).setValue(최저가);     // O (동점이라 원가는 같음)
+        _markExecutorTie_(sheet, row, 동점, 최저가);
+        return;
+      }
+
       const 최저 = 후보.reduce((a, b) => a.원가 < b.원가 ? a : b);
       sheet.getRange(row, 10).setValue(최저.실행사); // J
       sheet.getRange(row, 15).setValue(최저.원가);   // O
+      _clearExecutorTie_(sheet, row);
+    }
+
+    // [2026-10-16] J열(실행사)을 직접 고르면 → 동점 선택 표시 해제 (원래 자유 입력 칸으로)
+    if (col === 10 && String(sheet.getRange(row, 10).getValue() || '').trim()) {
+      _clearExecutorTie_(sheet, row);
     }
     return;
   }
@@ -208,4 +224,25 @@ function _updateCalcSheetTabColor_(sheet) {
   } catch (e) {
     // 탭 색상 오류는 다른 기능에 영향 주지 않도록 조용히 처리
   }
+}
+
+/* ───── [2026-10-16] 최저가 동점 실행사 선택 ─────────────────────────────
+ * 동점이면 J열에 동점 실행사만 선택 목록 + 연노랑 + 메모. 목록 밖 실행사도 직접 입력 가능(경고만).
+ * 실행사를 고르거나 동점이 아니게 되면 원래대로(선택 목록 없음, 색·메모 제거).
+ * 송출 동기화(HYB_Trigger)도 동점이면 배정하지 않고 J열 선택을 기다림 (_autoExecutor_ 의 tie).
+ */
+const TIE_NOTE_MARK = '⚖️ 최저가 동점';
+function _markExecutorTie_(sheet, row, executors, cost) {
+  const cell = sheet.getRange(row, 10);
+  cell.setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(executors, true).setAllowInvalid(true).build());
+  cell.setBackground('#fff2cc');
+  cell.setNote(`${TIE_NOTE_MARK} — 실행사를 선택해 주세요\n${executors.join(' / ')} (원가 ${Number(cost).toLocaleString()}원)`);
+}
+function _clearExecutorTie_(sheet, row) {
+  const cell = sheet.getRange(row, 10);
+  if (!String(cell.getNote() || '').startsWith(TIE_NOTE_MARK)) return;   // 동점 표시한 칸만 되돌림
+  cell.setDataValidation(null);
+  cell.setBackground(null);
+  cell.setNote('');
 }

@@ -307,7 +307,7 @@ function HYB_Trigger(e) {
     // 매체사·소재를 바꾼 경우: 업무시트 자동배정(onEdit)과 같은 규칙으로 실행사·원가를 바로 계산 (기다리지 않음)
     if (col === HYB.COL.MEDIA || col === HYB.COL.MATERIAL) {
       const auto = _autoExecutor_(media, material);
-      if (auto) { execNow = auto.exec; cost = auto.cost; }
+      if (auto) { execNow = auto.exec; cost = auto.cost; }   // 동점이면 execNow='' → 이전 칸 반려만, 선택 후 배정
     }
     const roundNow    = String(sheet.getRange(row, HYB.COL.ROUND).getValue()          || '').trim();
     const execCache   = String(sheet.getRange(row, HYB.COL.EXECUTOR_CACHE).getValue() || '').trim();
@@ -433,12 +433,16 @@ function _autoExecutor_(media, material) {
   const nz = v => String(v === null || v === undefined ? '' : v).replace(/\s+/g, ' ').trim();
   const money = v => { const n = parseFloat(String(v === null || v === undefined ? '' : v).replace(/[^\d.-]/g, '')); return isNaN(n) ? 0 : Math.round(n); };
   let best = null;
+  const atMin = new Set();
   for (const r of sh.getRange(2, 1, last - 1, 4).getValues()) {
     if (nz(r[0]) !== nz(media) || nz(r[3]) !== nz(material)) continue;
     const c = money(r[2]);
-    // 동점이면 표에서 아래쪽 실행사 — 업무시트 자동배정(reduce: a.원가 < b.원가 ? a : b)과 똑같이
-    if (c > 0 && (!best || c <= best.cost)) best = { exec: nz(r[1]), cost: c };
+    if (!(c > 0)) continue;
+    if (!best || c < best.cost) atMin.clear();
+    if (!best || c <= best.cost) { best = { exec: nz(r[1]), cost: c }; atMin.add(nz(r[1])); }
   }
+  // [2026-10-16] 최저가 동점(서로 다른 실행사 2곳 이상) → 배정하지 않고 담당자 선택 대기 (업무시트 J열 선택 목록)
+  if (best && atMin.size >= 2) return { exec: '', cost: best.cost, tie: [...atMin] };
   return best;
 }
 
