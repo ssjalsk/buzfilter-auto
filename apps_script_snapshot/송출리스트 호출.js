@@ -276,9 +276,13 @@ function HYB_Trigger(e) {
     const watch = [HYB.COL.STATUS, HYB.COL.SEND_DATE, HYB.COL.MEDIA, HYB.COL.EXECUTOR, HYB.COL.MATERIAL, HYB.COL.LINK];
     if (!watch.includes(col)) return;
 
-    // I/J/K 변경은 5초 안정화 후 처리
+    // [2026-10-16 속도] 예전: I/J/K 변경 시 무조건 5초 대기(실행사 자동 배정 기다림)
+    //  → 실행사는 아래에서 매체단가표로 직접 계산하므로 새 업무는 대기 없음.
+    //    이미 배정된 업무의 매체사·소재를 바꿀 때만 2초 대기 (I·K를 연달아 고칠 때 중간 실행사로 잘못 이관 방지)
     const isIJK = [HYB.COL.MEDIA, HYB.COL.EXECUTOR, HYB.COL.MATERIAL].includes(col);
-    if (isIJK) Utilities.sleep(HYB.STABILIZE_DELAY_MS);
+    if (isIJK && col !== HYB.COL.EXECUTOR && String(sheet.getRange(row, HYB.COL.EXECUTOR_CACHE).getValue() || '').trim()) {
+      Utilities.sleep(2000);
+    }
 
     // [2026-10-16] 송출 동기화 전용 잠금(문서 잠금) — 정산 자동매칭(스크립트 잠금)이 오래 걸려도 서로 막지 않음
     const lock = LockService.getDocumentLock();
@@ -296,10 +300,15 @@ function HYB_Trigger(e) {
     const sendDate    = sheet.getRange(row, HYB.COL.SEND_DATE).getValue();
     const sendDateStr = normalizeDateString_(sendDate);
     const media       = String(sheet.getRange(row, HYB.COL.MEDIA).getValue()          || '').trim();
-    const execNow     = String(sheet.getRange(row, HYB.COL.EXECUTOR).getValue()       || '').trim();
+    let   execNow     = String(sheet.getRange(row, HYB.COL.EXECUTOR).getValue()       || '').trim();
     const material    = String(sheet.getRange(row, HYB.COL.MATERIAL).getValue()       || '').trim();
     const link        = String(sheet.getRange(row, HYB.COL.LINK).getValue()           || '').trim();
-    const cost        = sheet.getRange(row, HYB.COL.COST).getValue();
+    let   cost        = sheet.getRange(row, HYB.COL.COST).getValue();
+    // 매체사·소재를 바꾼 경우: 업무시트 자동배정(onEdit)과 같은 규칙으로 실행사·원가를 바로 계산 (기다리지 않음)
+    if (col === HYB.COL.MEDIA || col === HYB.COL.MATERIAL) {
+      const auto = _autoExecutor_(media, material);
+      if (auto) { execNow = auto.exec; cost = auto.cost; }
+    }
     const roundNow    = String(sheet.getRange(row, HYB.COL.ROUND).getValue()          || '').trim();
     const execCache   = String(sheet.getRange(row, HYB.COL.EXECUTOR_CACHE).getValue() || '').trim();
 
@@ -340,7 +349,7 @@ function HYB_Trigger(e) {
     if (isVegan) {
       handleVeganUpsert_(ctx);
     } else {
-      handleBaseUpsert_({ ...ctx, targetSheetName });
+      handleBaseUpsert_({ ...ctx, targetSheetName, execName: execNow });
     }
     try { CacheService.getScriptCache().put('hyb:' + row, _hybRowSig_(sheet, row), 21600); } catch (e) {}
     lock.releaseLock();
@@ -360,15 +369,20 @@ function _hybRowSig_(sheet, row) {
 }
 
 // ============== 기본 업서트 (플래나·한미마·이디엘·공감·외부 시트) ==============
-function handleBaseUpsert_({ row, subject, sendDateStr, media, material, cost, link, task, roundTrusted, targetSheetName, linkOnly }) {
+function handleBaseUpsert_({ row, subject, sendDateStr, media, material, cost, link, task, roundTrusted, targetSheetName, linkOnly, execName }) {
   const main   = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HYB.MAIN_SHEET);
   const target = getTargetSheet_(targetSheetName);
   const layout = HYB.TARGET_LAYOUT[targetSheetName];
   if (!target || !layout) { log_('ERROR','Target missing',{targetSheetName}); return; }
 
-  if (targetSheetName === '플래나 송출') _checkPlannerMonthReset_(target, layout);
+  // [속도] 실행사 시트는 한 번만 읽음 (플래나 월 리셋 확인도 읽은 값으로)
+  let S = _readSlots_(target, layout);
+  if (targetSheetName === '플래나 송출' && _plannerNeedsReset_(S, layout)) {
+    _ensureSlots_(target, targetSheetName, layout, true);
+    log_('INFO', '플래나 월 리셋', {});
+    S = _readSlots_(target, layout);
+  }
 
-  const S = _readSlots_(target, layout);
   let key = { id: task.id, dup: task.dup, mainRow: row, roundTrusted, subject, sendDateStr };
   let i = _findTaskSlot_(S, layout, key);
   if (i < 0 && task.dup) {               // 행 복사본 → 새 업무로
@@ -379,22 +393,80 @@ function handleBaseUpsert_({ row, subject, sendDateStr, media, material, cost, l
   if (i < 0) { log_('WARN','No free slot',{targetSheetName}); return; }
   const rowIndex = _rowOf_(i);
 
+  // [속도] 회차를 가장 먼저 업무시트에 표시 (담당자가 바로 보고 접수할 수 있게)
+  const roundVal = _cellStr_(S.vals, i, layout.A_round);
+  main.getRange(row, HYB.COL.ROUND).setValue(roundVal);
+  const execVal = execName || String(main.getRange(row, HYB.COL.EXECUTOR).getValue() || '').trim();
+  if (execVal) main.getRange(row, HYB.COL.EXECUTOR_CACHE).setValue(execVal);
+  SpreadsheetApp.flush();
+
   if (linkOnly && existing) {
     // 링크만 입력: 이미 있는 이 업무 칸의 링크만 갱신 (담당자가 직접 적은 금액·'결제 완' 등 보존)
     target.getRange(rowIndex, layout.linkCol).setValue(link || '');
   } else {
-    applyBaseFields_(target, layout, rowIndex, { subject, sendDateStr, media, material, cost });
-    if (link) target.getRange(rowIndex, layout.linkCol).setValue(link);
+    // [속도] B~H 한 번에 쓰기 (새 링크 없으면 기존 링크 유지)
+    const cur = S.vals[i].slice(0, 8);
+    while (cur.length < 8) cur.push('');
+    const put = (col, v) => { cur[col - 1] = v; };
+    put(layout.B_subject, subject || '');
+    put(layout.C_date, normalizeDateString_(sendDateStr) || '');
+    put(layout.linkCol === 4 ? layout.E_media : layout.D_media, media || '');
+    put(layout.linkCol === 4 ? layout.F_material : layout.E_material, material || '');
+    if (cost !== undefined) put(layout.G_cost, cost || '');
+    if (layout.H_flag) put(layout.H_flag, '');
+    if (link) put(layout.linkCol, link);
+    target.getRange(rowIndex, 2, 1, 7).setValues([cur.slice(1, 8)]);
   }
   _setTag_(target, rowIndex, layout.B_subject, key.id, row);
 
-  const roundVal = String(target.getRange(rowIndex, layout.A_round).getValue() || '').trim();
-  main.getRange(row, HYB.COL.ROUND).setValue(roundVal);
-  const execNow = main.getRange(row, HYB.COL.EXECUTOR).getValue();
-  if (execNow) main.getRange(row, HYB.COL.EXECUTOR_CACHE).setValue(execNow);
-
-  _ensureSlots_(target, targetSheetName, layout, false);
+  // [속도] 회차 칸 정리·채우기는 필요할 때만
+  if (_slotsNeedWork_(targetSheetName, layout, S, i)) _ensureSlots_(target, targetSheetName, layout, false);
   log_('INFO','Base upsert OK',{ targetSheetName, rowIndex, roundVal, id: key.id });
+}
+
+/** 매체사+소재 → 매체단가표 최저 원가 실행사 (업무시트 onEdit 자동배정과 같은 규칙). 없으면 null */
+function _autoExecutor_(media, material) {
+  if (!media || !material || material === '수작업') return null;
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('매체단가표');
+  if (!sh) return null;
+  const last = sh.getLastRow(); if (last < 2) return null;
+  const nz = v => String(v === null || v === undefined ? '' : v).replace(/\s+/g, ' ').trim();
+  const money = v => { const n = parseFloat(String(v === null || v === undefined ? '' : v).replace(/[^\d.-]/g, '')); return isNaN(n) ? 0 : Math.round(n); };
+  let best = null;
+  for (const r of sh.getRange(2, 1, last - 1, 4).getValues()) {
+    if (nz(r[0]) !== nz(media) || nz(r[3]) !== nz(material)) continue;
+    const c = money(r[2]);
+    if (c > 0 && (!best || c < best.cost)) best = { exec: nz(r[1]), cost: c };
+  }
+  return best;
+}
+
+/** 플래나: 읽어 둔 칸 값으로 월 리셋 필요 여부 (마지막 사용 칸의 송출일 월 ≠ 이번 달) */
+function _plannerNeedsReset_(S, layout) {
+  const now = new Date();
+  for (let i = S.vals.length - 1; i >= 0; i--) {
+    if (!_cellStr_(S.vals, i, layout.B_subject)) continue;
+    const p = (normalizeDateString_(S.vals[i][layout.C_date - 1]) || '').split('.');
+    if (p.length === 3 && !isNaN(parseInt(p[0], 10))) {
+      return parseInt(p[0], 10) !== now.getFullYear() || parseInt(p[1], 10) !== now.getMonth() + 1;
+    }
+  }
+  return true;
+}
+
+/** 배정 후 빈 칸 번호가 차례대로이고 SLOT_LOW 보다 많이 남았으면 다시 읽지 않음 */
+function _slotsNeedWork_(sheetName, layout, S, assignedIdx) {
+  if (!SLOT_CFG[sheetName]) return false;
+  let lastUsed = assignedIdx;
+  for (let k = S.vals.length - 1; k > lastUsed; k--) if (_cellStr_(S.vals, k, layout.B_subject)) { lastUsed = k; break; }
+  const tail = S.vals.length - (lastUsed + 1);
+  if (tail <= SLOT_LOW) return true;
+  const first = parseInt(_cellStr_(S.vals, lastUsed + 1, layout.A_round), 10);
+  if (isNaN(first)) return true;
+  for (let k = 1; k < tail; k++) {
+    if (parseInt(_cellStr_(S.vals, lastUsed + 1 + k, layout.A_round), 10) !== first + k) return true;
+  }
+  return false;
 }
 
 // ============== 비건뉴스 전용 업서트 ==============
@@ -561,7 +633,7 @@ function handleRejectAndReassign_({ row, subject, sendDateStr, media, material, 
   // ── 3) 새 시트에 배정 (이 업무의 같은 구간 반려 칸이 있으면 그 자리, 없으면 새 칸) ──
   const ctx = { row, subject, sendDateStr, media, material, cost, link, task, roundTrusted: '' };
   if (nextName === '비건뉴스') handleVeganUpsert_(ctx);
-  else handleBaseUpsert_({ ...ctx, targetSheetName: nextName });
+  else handleBaseUpsert_({ ...ctx, targetSheetName: nextName, execName: newExecutor });
 
   main.getRange(row, HYB.COL.EXECUTOR_CACHE).setValue(newExecutor);
   log_('INFO','Reject+Reassign done',{from: prevName, to: nextName});
