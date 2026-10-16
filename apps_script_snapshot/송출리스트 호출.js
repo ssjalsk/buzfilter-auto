@@ -436,7 +436,8 @@ function _autoExecutor_(media, material) {
   for (const r of sh.getRange(2, 1, last - 1, 4).getValues()) {
     if (nz(r[0]) !== nz(media) || nz(r[3]) !== nz(material)) continue;
     const c = money(r[2]);
-    if (c > 0 && (!best || c < best.cost)) best = { exec: nz(r[1]), cost: c };
+    // 동점이면 표에서 아래쪽 실행사 — 업무시트 자동배정(reduce: a.원가 < b.원가 ? a : b)과 똑같이
+    if (c > 0 && (!best || c <= best.cost)) best = { exec: nz(r[1]), cost: c };
   }
   return best;
 }
