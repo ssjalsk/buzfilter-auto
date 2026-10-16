@@ -349,9 +349,13 @@ def _get_prepaid_info(gc, advertiser):
     if len(rows) < 2:
         return 0, -1, -1
     headers = rows[0]
-    if "선충전잔액" not in headers:
+    if "선충전잔액" in headers:
+        pre_col_idx = headers.index("선충전잔액")
+    elif len(headers) > 6:
+        # [2026-10-16] 제목 칸(G1)이 지워지거나 0으로 덮여도 G열 고정 위치로 계속 기록 (남은 입금액이 사라지지 않게)
+        pre_col_idx = 6
+    else:
         return 0, -1, -1
-    pre_col_idx = headers.index("선충전잔액")
     adv_n = norm(advertiser)
     담당자_idx = headers.index("담당자명") if "담당자명" in headers else -1
     사업자_idx = headers.index("사업자명") if "사업자명" in headers else -1
@@ -616,6 +620,19 @@ def match_payment(request):
                 amount_h = parse_amount(h_raw or 0)
             except Exception:
                 pass  # 읽기 실패 시 0으로 유지
+
+        # [2026-10-16] 같은 정산 행 이중 처리 방지: 이미 광고주(F)가 채워졌거나 처리기록(AC)이 있으면 다시 처리하지 않음
+        #  (어떤 경로로든 같은 입금 행에 매칭 요청이 두 번 오면, 두 번째는 미입금 건이 없어 입금액 전액이 선충전으로 쌓였음)
+        try:
+            settle_ws = gc.open_by_key(SETTLE_SPREADSHEET_ID).worksheet(SETTLE_SHEET)
+            f_now  = str(settle_ws.cell(int(row), 6).value or "").strip()
+            ac_now = str(settle_ws.cell(int(row), RECORD_COL).value or "").strip()
+        except Exception:
+            f_now = ac_now = ""
+        if f_now or ac_now:
+            return (json.dumps({"ok": True, "matched": None, "skipped": True,
+                                "msg": f"행 {row}: 이미 처리된 입금 행 (F='{f_now}', AC='{ac_now}') — 중복 요청 무시"}), 200,
+                    {"Content-Type": "application/json"})
 
         customers = load_customer_db(gc)
         res       = match_customer(payer, customers, amount_k=amount_k, amount_h=amount_h, gc=gc)
