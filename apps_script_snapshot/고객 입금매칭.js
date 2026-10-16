@@ -301,7 +301,7 @@ function _findPrepaidCustomer_(db, customer){
     const r=vals[i];
     const aliases=iAlias>=0?String(r[iAlias]||'').split(',').map(a=>a.trim()).filter(a=>a):[];
     const name=iName>=0?_norm(r[iName]):'', biz=iBiz>=0?_norm(r[iBiz]):'';
-    return {dbRow:i+1, prepaid:_num(r[iPre]), prepaidCol:iPre+1, payerName:(aliases[0]||name||biz)};
+    return {dbRow:i+1, prepaid:_num(r[iPre]), prepaidCol:iPre+1, payerName:(aliases[0]||name||biz), custName:(name||biz)};
   };
   for(let i=1;i<vals.length;i++){
     if(iName>=0 && _nameKey_(vals[i][iName])===key) return pick(i);
@@ -355,8 +355,12 @@ function _checkPrepaidCredit_(workSheet, row) {
     const paid = _paidNum_(workSheet.getRange(row, W.S).getValue());
     const need = Math.max(0, amount - paid);
 
+    // [2026-10-16] 선충전으로 처리한 건은 R열에 '선충전(고객명)' 으로 표시 → 실제 입금과 구분해 검토 가능
+    //  (예전: 별칭 첫 이름을 적어 '변성만' 처럼 실제 입금자처럼 보였음 — 하루플란트치과 사례)
+    const today = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
     if (c.prepaid >= need) {
-      if (c.payerName) _setCell(workSheet, row, W.R, c.payerName);
+      _setCell(workSheet, row, W.R, '선충전(' + (c.custName || customer) + ')');
+      workSheet.getRange(row, W.R).setNote(`선충전 사용 ${need.toLocaleString()}원 (${today})\n잔액 ${c.prepaid.toLocaleString()}원 → ${(c.prepaid - need).toLocaleString()}원`);
       _setCell(workSheet, row, W.Q, '입금완료');
       workSheet.getRange(row, W.S).clearContent();
       _updateStatusIfPublished_(workSheet, row);
@@ -364,6 +368,7 @@ function _checkPrepaidCredit_(workSheet, row) {
     } else {
       db.getRange(c.dbRow, c.prepaidCol).setValue(0);
       _setCell(workSheet, row, W.S, paid + c.prepaid);
+      workSheet.getRange(row, W.S).setNote(`선충전 사용 ${c.prepaid.toLocaleString()}원 (${today}) — 잔액 0원\n남은 금액 ${(need - c.prepaid).toLocaleString()}원은 다음 입금 때 처리`);
     }
   });
 }
