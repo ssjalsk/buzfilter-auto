@@ -14,6 +14,10 @@ function onEdit(e) {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const 단가시트 = ss.getSheetByName("매체단가표");
 
+    // [2026-10-19] 행 복사·끌어 채우기로 숨은 칸(AC 고유번호)까지 복사되면 → 붙여넣은 행은 새 업무로 시작
+    // (고유번호·실행사기억·회차를 비움. 원본 행은 그대로) — 복사본이 원본의 실행사 칸을 건드리는 것 방지
+    if (col <= 29 && col + nCols - 1 >= 29) _clearCopiedTaskIds_(sheet, row, nRows);
+
     // B: 고객명 → F: 의뢰일 자동
     if (col === 2) {
       const dateCell = sheet.getRange(row, 6); // F
@@ -245,4 +249,25 @@ function _clearExecutorTie_(sheet, row) {
   cell.setDataValidation(null);
   cell.setBackground(null);
   cell.setNote('');
+}
+
+/* ───── [2026-10-19] 행 복사 시 고유번호 중복 방지 ─────────────────────
+ * 붙여넣은(편집된) 행의 AC 고유번호가 다른 행에도 있으면 = 복사본 → AC(29)·AA 실행사기억(27)·L 회차(12) 비움.
+ * 송출 동기화가 다음 편집 때 새 업무로 보고 새 칸에 배정함.
+ */
+function _clearCopiedTaskIds_(sheet, startRow, nRows) {
+  const last = sheet.getLastRow();
+  if (last < 2) return;
+  const ids = sheet.getRange(2, 29, last - 1, 1).getValues().map(r => String(r[0] || '').trim());
+  const count = {};
+  ids.forEach(id => { if (id) count[id] = (count[id] || 0) + 1; });
+  for (let r = startRow; r < startRow + nRows && r <= last; r++) {
+    const id = ids[r - 2];
+    if (id && count[id] > 1) {
+      sheet.getRange(r, 29).setValue('');
+      sheet.getRange(r, 27).setValue('');
+      sheet.getRange(r, 12).setValue('');
+      count[id]--;
+    }
+  }
 }

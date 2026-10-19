@@ -140,8 +140,9 @@ function _taskIdOf_(main, row) {
   if (!id) { id = _newTaskId_(); cell.setValue(id); return { id, dup: false }; }
   const last = main.getLastRow();
   const ids  = main.getRange(2, HYB.COL.TASK_ID, last - 1, 1).getValues();
-  const dup  = ids.some((r, i) => i + 2 !== row && String(r[0]).trim() === id);
-  return { id, dup };
+  const dupRows = [];
+  ids.forEach((r, i) => { if (i + 2 !== row && String(r[0]).trim() === id) dupRows.push(i + 2); });
+  return { id, dup: dupRows.length > 0, dupRows };
 }
 /** 행 복사로 번호가 겹쳤는데 이 행이 원래 주인이 아니면 → 새 번호 + L·실행사기억 비움 (새 업무로 처리) */
 function _regenTaskId_(main, row) {
@@ -190,15 +191,18 @@ function _cycleStartIdx_(sheetName, layout, vals) {
  *  2) [예전 건] 회차+주제 일치 — roundTrusted(지금 실행사의 회차일 때)만, 고유번호 없는 칸만, 송출일 가까운 칸
  *  3) [예전 건] 주제+송출일 일치 — 고유번호 없는 칸만
  */
-function _findTaskSlot_(S, layout, { id, dup, mainRow, roundTrusted, subject, sendDateStr }) {
+function _findTaskSlot_(S, layout, { id, dup, dupRows, mainRow, roundTrusted, subject, sendDateStr }) {
   const { vals, tags } = S;
   const d = normalizeDateString_(sendDateStr);
   if (id) {
     for (let i = vals.length - 1; i >= 0; i--) {
       const t = tags[i];
       if (!t || t.id !== id) continue;
-      if (!dup || t.row === mainRow ||
-          (_cellStr_(vals, i, layout.B_subject) === subject && normalizeDateString_(vals[i][layout.C_date - 1]) === d)) return i;
+      // [2026-10-19] 번호가 겹치면(행 복사) 칸에 기록된 원래 행이 이 행일 때만 인정.
+      //  기록된 행이 다른 겹치는 행이면 그쪽이 주인 → 이 행은 복사본 (주제·송출일이 같아도 원본 칸을 가져가지 않음)
+      if (!dup || t.row === mainRow) return i;
+      if (dupRows && dupRows.includes(t.row)) continue;
+      if (_cellStr_(vals, i, layout.B_subject) === subject && normalizeDateString_(vals[i][layout.C_date - 1]) === d) return i;
     }
   }
   if (roundTrusted) {
@@ -383,7 +387,7 @@ function handleBaseUpsert_({ row, subject, sendDateStr, media, material, cost, l
     S = _readSlots_(target, layout);
   }
 
-  let key = { id: task.id, dup: task.dup, mainRow: row, roundTrusted, subject, sendDateStr };
+  let key = { id: task.id, dup: task.dup, dupRows: task.dupRows, mainRow: row, roundTrusted, subject, sendDateStr };
   let i = _findTaskSlot_(S, layout, key);
   if (i < 0 && task.dup) {               // 행 복사본 → 새 업무로
     key = { ...key, id: _regenTaskId_(main, row), dup: false, roundTrusted: '' };
@@ -483,7 +487,7 @@ function handleVeganUpsert_({ row, subject, sendDateStr, media, material, link, 
 
   const section = getVeganSection_(media, material);
   const layout  = VEGAN_SECTION_LAYOUT[section];
-  let key = { id: task.id, dup: task.dup, mainRow: row, roundTrusted, subject, sendDateStr };
+  let key = { id: task.id, dup: task.dup, dupRows: task.dupRows, mainRow: row, roundTrusted, subject, sendDateStr };
 
   // 섹션이 바뀐 경우(같은 비건 실행사 안에서 매체사·소재 변경): 예전 섹션의 이 업무 칸은 반려 처리
   for (const [sec, lay] of Object.entries(VEGAN_SECTION_LAYOUT)) {
@@ -605,7 +609,7 @@ function handleFinalReject_({ row, sheet, subject, sendDateStr, media, material,
   }
 
   const roundTrusted = (execCache && execCache === execNow) ? roundNow : '';
-  _rejectTaskSlot_(sheetName, { id: task.id, dup: task.dup, mainRow: row, roundTrusted, subject, sendDateStr }, media, material);
+  _rejectTaskSlot_(sheetName, { id: task.id, dup: task.dup, dupRows: task.dupRows, mainRow: row, roundTrusted, subject, sendDateStr }, media, material);
 
   sheet.getRange(row, HYB.COL.EXECUTOR_CACHE).setValue('');
   sheet.getRange(row, HYB.COL.ROUND).setValue('');
@@ -620,7 +624,7 @@ function handleRejectAndReassign_({ row, subject, sendDateStr, media, material, 
 
   // ── 1) 이전 시트에서 이 업무 칸 반려 (L열 회차는 이전 실행사 것이므로 이전 시트에서만 사용) ──
   if (prevName) {
-    _rejectTaskSlot_(prevName, { id: task.id, dup: task.dup, mainRow: row, roundTrusted: roundNow, subject, sendDateStr }, media, material);
+    _rejectTaskSlot_(prevName, { id: task.id, dup: task.dup, dupRows: task.dupRows, mainRow: row, roundTrusted: roundNow, subject, sendDateStr }, media, material);
   } else {
     log_('WARN','Reject: oldExecutor 매핑 없음',{oldExecutor});
   }
