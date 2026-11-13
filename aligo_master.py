@@ -1166,6 +1166,79 @@ def parse_generated_reviews(text):
             reviews.append((current_num, content))
     return sorted(reviews, key=lambda x: x[0])
 
+# ==================== [2026-11-13] 당근 입력 (당근리뷰 양식 C열 채우기) ====================
+DAANGN_TEMPLATE = "당근리뷰_양식.xlsx"   # 앱 폴더에 함께 배포 (A No / B 별점 / C 리뷰내용 / D 사진 / E 발행날짜 / F 종류)
+
+def parse_numbered_reviews(text):
+    """'1 텍스트' / '1. 텍스트' / '1) 텍스트' / 번호만 한 줄 + 다음 줄 텍스트 → [(번호, 내용)]
+    번호 바로 뒤에 글자가 붙은 줄('3일 써봤는데')과 앞 번호보다 크지 않은 번호는 본문으로 취급."""
+    out, cur_num, cur_lines = [], None, []
+    pat = re.compile(r"^\s*(\d{1,4})\s*([.)．]\s*|\s+|$)(.*)$")
+    for line in str(text or "").splitlines():
+        m = pat.match(line)
+        ok_num = False
+        if m:
+            n = int(m.group(1))
+            marked = bool(m.group(2).strip()) or not m.group(3).strip()   # '1.' '1)' 또는 번호만 있는 줄
+            # 다음 번호(+1)면 '1 텍스트' 도 인정, 번호를 건너뛰면 '.'·')'·번호만 줄일 때만 인정('10 점 만점' 같은 본문 오인 방지)
+            ok_num = cur_num is None or n == cur_num + 1 or (n > cur_num and marked)
+        if ok_num:
+            m = re.match(r"^\s*(\d{1,4})\s*(?:[.)．]\s*|\s+|$)(.*)$", line)
+            if cur_num is not None:
+                out.append((cur_num, "\n".join(cur_lines).strip()))
+            cur_num, cur_lines = int(m.group(1)), ([m.group(2).strip()] if m.group(2).strip() else [])
+        elif cur_num is not None:
+            cur_lines.append(line.rstrip())
+    if cur_num is not None:
+        out.append((cur_num, "\n".join(cur_lines).strip()))
+    return [(n, c) for n, c in out if c]
+
+def daangn_template_last_no():
+    """양식에 미리 매겨진 마지막 No (현재 60)"""
+    import openpyxl
+    try:
+        ws = openpyxl.load_workbook(os.path.join(os.path.dirname(os.path.abspath(__file__)), DAANGN_TEMPLATE), read_only=True).worksheets[0]
+        nos = [int(r[0]) for r in ws.iter_rows(min_row=2, max_col=1, values_only=True) if isinstance(r[0], (int, float))]
+        return max(nos) if nos else 0
+    except Exception:
+        return 0
+
+def fill_daangn_template(reviews):
+    """당근리뷰 양식에 번호대로 C열(리뷰내용)만 채움. D(사진)·E(발행날짜)는 비움. 마지막 No보다 많으면 행을 늘림"""
+    from copy import copy
+    import openpyxl
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), DAANGN_TEMPLATE)
+    wb = openpyxl.load_workbook(path)
+    ws = wb.worksheets[0]
+    no_row = {}
+    for r in range(2, ws.max_row + 1):
+        v = ws.cell(r, 1).value
+        if isinstance(v, (int, float)) or (isinstance(v, str) and v.strip().isdigit()):
+            no_row[int(v)] = r
+    last_r = max(no_row.values()) if no_row else 1
+    last_no = max(no_row) if no_row else 0
+    for r in range(2, ws.max_row + 1):          # D·E 비우기
+        ws.cell(r, 4).value = None
+        ws.cell(r, 5).value = None
+    for n, content in reviews:
+        if n not in no_row:                        # 행 늘리기: 마지막 행 서식·별점 복사
+            for k in range(last_no + 1, n + 1):
+                last_r += 1
+                for c in range(1, ws.max_column + 1):
+                    src, dst = ws.cell(last_r - 1, c), ws.cell(last_r, c)
+                    if src.has_style:
+                        dst._style = copy(src._style)
+                ws.cell(last_r, 1).value = k
+                ws.cell(last_r, 2).value = ws.cell(last_r - 1, 2).value
+                if ws.row_dimensions[last_r - 1].height:
+                    ws.row_dimensions[last_r].height = ws.row_dimensions[last_r - 1].height
+                no_row[k] = last_r
+            last_no = max(last_no, n)
+        ws.cell(no_row[n], 3).value = content
+    out = io.BytesIO(); wb.save(out); out.seek(0)
+    return out
+
+
 # ==================== [2026-11-13] 리뷰생성 베타버전 (체험단 참고용 예시) ====================
 # 기존 generate_reviews_with_claude 와 별개. 페르소나(성별·연령) 배정 없음.
 # 추가: 작업자 요청사항·필수 키워드 / 10자부터 가능 / 설정별 글자수 범위 검사 + 1회 자동 보정 / 번호 지정 수정
@@ -2452,6 +2525,7 @@ with st.sidebar:
         "✍️ 리뷰 생성",
         "🧪 리뷰생성 베타버전",
         "📝 리뷰 입력",
+        "🥕 당근 입력",
         "📄 견적서 생성",
         "🖼️ 상세페이지 제작",
         "🌐 홈페이지 자동 개선",
@@ -2861,6 +2935,38 @@ elif menu == "📝 리뷰 입력":
                 st.download_button("⬇️ 엑셀 다운로드", create_excel(revs), "리뷰목록.xlsx", use_container_width=True, type="primary")
             else:
                 st.error("❌ 리뷰를 파싱할 수 없습니다.")
+
+elif menu == "🥕 당근 입력":
+    # [2026-11-13] 번호 붙은 리뷰 텍스트 → 당근리뷰 양식 C열(리뷰내용) 채워서 엑셀
+    st.title("🥕 당근 입력")
+    _dg_last = daangn_template_last_no()
+    st.caption(f"번호 붙은 리뷰를 붙여넣으면 당근리뷰 양식의 **C열(리뷰내용)** 에 번호대로 채웁니다. D(사진)·E(발행날짜)는 빈칸, 양식 No {_dg_last}보다 많으면 행을 늘립니다.")
+    dg_text = st.text_area("리뷰 텍스트 붙여넣기", height=320, key="dg_text",
+                           placeholder="1 리뷰 내용\n2. 리뷰 내용\n3) 리뷰 내용\n4\n번호만 쓰고 다음 줄에 써도 됩니다")
+    if dg_text.strip():
+        dg_revs = parse_numbered_reviews(dg_text)
+        if not dg_revs:
+            st.error("❌ 번호가 붙은 리뷰를 찾지 못했습니다. (예: 1 리뷰 내용)")
+        else:
+            _nums = [n for n, _ in dg_revs]
+            _miss = [k for k in range(1, max(_nums) + 1) if k not in set(_nums)]
+            st.markdown(f"### 📊 **{len(dg_revs)}개** 리뷰 감지 (No {min(_nums)} ~ {max(_nums)})")
+            if _miss:
+                st.warning(f"⚠️ 빠진 번호: {', '.join(map(str, _miss[:30]))}{' …' if len(_miss) > 30 else ''} — 해당 행은 빈칸으로 둡니다.")
+            if _dg_last and max(_nums) > _dg_last:
+                st.info(f"ℹ️ 양식(No {_dg_last})보다 많아서 No {max(_nums)}까지 행을 늘립니다.")
+            with st.expander("👀 미리보기", expanded=True):
+                for _n, _c in dg_revs[:5]:
+                    st.markdown(f"**No {_n}**"); st.text(_c[:200] + ("..." if len(_c) > 200 else ""))
+                if len(dg_revs) > 5:
+                    st.caption(f"... 외 {len(dg_revs) - 5}개")
+            try:
+                st.download_button("⬇️ 당근리뷰 엑셀 다운로드", fill_daangn_template(dg_revs),
+                                   f"당근리뷰_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   use_container_width=True, type="primary", key="dg_dl")
+            except FileNotFoundError:
+                st.error(f"❌ 양식 파일({DAANGN_TEMPLATE})을 찾을 수 없습니다.")
 
 elif menu == "📄 견적서 생성":
     st.title("📄 견적서 자동 생성")
