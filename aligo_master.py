@@ -1166,6 +1166,100 @@ def parse_generated_reviews(text):
             reviews.append((current_num, content))
     return sorted(reviews, key=lambda x: x[0])
 
+# ==================== [2026-11-13] 리뷰생성 베타버전 (체험단 참고용 예시) ====================
+# 기존 generate_reviews_with_claude 와 별개. 페르소나(성별·연령) 배정 없음.
+# 추가: 작업자 요청사항·필수 키워드 / 10자부터 가능 / 설정별 글자수 범위 검사 + 1회 자동 보정 / 번호 지정 수정
+
+def _beta_char_range(c):
+    c = int(c)
+    if c <= 50:
+        return max(5, round(c * 0.6)), c                 # 50자 이내 요청 → 넘지 않게
+    return round(c * 0.8), round(c * 1.2)
+
+def _beta_norm(s):
+    return re.sub(r"\s", "", str(s)).lower()
+
+def _beta_keywords(text):
+    return [k.strip() for k in re.split(r"[,，\n]", text or "") if k.strip()]
+
+def _beta_rules(char_count, keywords, selling_points, worker_request):
+    lo, hi = _beta_char_range(char_count)
+    kw = ", ".join(keywords) if keywords else "없음"
+    return f"""[작성 규칙]
+1. 각 리뷰는 공백 포함 {lo}~{hi}자. 이 범위를 반드시 지킨다.
+2. 필수 키워드({kw})를 리뷰마다 모두 자연스럽게 넣는다.
+3. 소구점({selling_points or '없음'}) 중심으로 제품 이야기만 쓴다. 여러 컨셉·사연을 넣지 않는다.
+4. 작업자 요청사항: {worker_request or '없음'}
+5. 존댓말·존칭 위주로 쓴다.
+6. '~요'로 끝나는 리뷰와 '~습니다/~합니다/~듭니다' 같은 '~다'로 끝나는 리뷰를 대략 절반씩 섞는다.
+7. ^^ ㅎㅎ ㅋㅋ !! 같은 표현은 전체의 3분의 1 정도 리뷰에만 가볍게 쓴다. 그림 이모지는 쓰지 않는다.
+8. 제품과 무관한 TMI(나이트·약국·살롱 등 장소나 사생활 이야기)와 목적에서 벗어난 내용은 쓰지 않는다.
+9. 문장 중간을 쉼표로 끊어 나열하지 않는다. 쉼표는 꼭 필요할 때만 쓴다.
+10. 리뷰끼리 같은 문장·표현을 반복하지 않는다.
+11. 과장·허위 효능 표현을 쓰지 않는다."""
+
+def _beta_check(content, char_count, keywords):
+    """규칙 위반 목록 (글자수·키워드)"""
+    lo, hi = _beta_char_range(char_count)
+    issues = []
+    n = len(content.strip())
+    if n < lo or n > hi:
+        issues.append(f"글자수 {n}자 (기준 {lo}~{hi}자)")
+    miss = [k for k in keywords if _beta_norm(k) not in _beta_norm(content)]
+    if miss:
+        issues.append("키워드 누락: " + ", ".join(miss))
+    return issues
+
+def generate_reviews_beta(client, product_info, selling_points, worker_request, keywords,
+                          review_count, char_count, image_description="", progress_callback=None):
+    BATCH = 20
+    rules = _beta_rules(char_count, keywords, selling_points, worker_request)
+    img = f"\n[제품 이미지 분석]\n{image_description}\n" if image_description else ""
+    out = []
+    batches = [(s, min(s + BATCH, review_count)) for s in range(0, review_count, BATCH)]
+    for bi, (s, e) in enumerate(batches):
+        prev = ""
+        if out:
+            prev = "\n[이미 쓴 리뷰 도입부 — 비슷하게 쓰지 말 것]\n" + "\n".join(f"- {c.splitlines()[0][:40]}" for _, c in out[-20:])
+        prompt = f"""너는 체험단 운영팀이 체험단원에게 참고용으로 나눠 줄 리뷰 예시를 쓰는 작가다.
+[제품 정보]
+{product_info}
+{img}
+{rules}
+{prev}
+[출력 형식]
+- {s + 1}번부터 {e}번까지 정확히 {e - s}개.
+- 각 리뷰는 "번호." 한 줄, 다음 줄부터 리뷰 내용. 설명·부연 없이 리뷰만 출력."""
+        resp = client.messages.create(model="claude-sonnet-4-6", max_tokens=8000, messages=[{"role": "user", "content": prompt}])
+        out.extend(parse_generated_reviews(resp.content[0].text.strip()))
+        if progress_callback:
+            progress_callback(bi + 1, len(batches), len(out))
+    # 규칙 위반(글자수·키워드) 리뷰만 1회 다시 쓰기
+    bad = [(n, c) for n, c in out if _beta_check(c, char_count, keywords)]
+    if bad:
+        fixed = revise_reviews_beta(client, bad, "규칙(특히 글자수 범위와 필수 키워드)에 맞게 다시 써 주세요.",
+                                    product_info, rules, issues={n: _beta_check(c, char_count, keywords) for n, c in bad})
+        fx = dict(fixed)
+        out = [(n, fx.get(n, c)) for n, c in out]
+    return out
+
+def revise_reviews_beta(client, targets, instruction, product_info, rules, issues=None):
+    """targets: [(번호, 내용)] — 이 리뷰들만 요청대로 수정해서 [(번호, 새 내용)] 반환"""
+    body = "\n\n".join(f"{n}.\n{c}" + (f"\n(문제: {' / '.join(issues[n])})" if issues and n in issues else "") for n, c in targets)
+    prompt = f"""아래 리뷰들만 수정 요청에 맞게 고쳐라. 요청과 관계없는 부분은 최대한 그대로 둔다.
+[제품 정보]
+{product_info}
+{rules}
+[수정 요청]
+{instruction}
+[수정할 리뷰]
+{body}
+[출력 형식] 같은 번호를 유지해서 "번호." 한 줄 다음 줄부터 수정된 리뷰만. 설명 없이."""
+    resp = client.messages.create(model="claude-sonnet-4-6", max_tokens=6000, messages=[{"role": "user", "content": prompt}])
+    got = dict(parse_generated_reviews(resp.content[0].text.strip()))
+    return [(n, got.get(n, c)) for n, c in targets]
+
+
 def parse_match_response(text):
     mc, mb = "미등록", "미등록"
     for line in text.split('\n'):
@@ -2356,6 +2450,7 @@ with st.sidebar:
         "🏭 버즈필터 발주",
         "🚚 위탁 발주",
         "✍️ 리뷰 생성",
+        "🧪 리뷰생성 베타버전",
         "📝 리뷰 입력",
         "📄 견적서 생성",
         "🖼️ 상세페이지 제작",
@@ -2604,6 +2699,136 @@ elif menu == "✍️ 리뷰 생성":
             for num, content in st.session_state.generated_reviews:
                 full_text += f"{num}.\n{content}\n\n"
             st.text_area("전체 리뷰 텍스트", value=full_text.strip(), height=400, label_visibility="collapsed")
+
+elif menu == "🧪 리뷰생성 베타버전":
+    # [2026-11-13] 체험단 참고용 예시 생성 — 기존 '✍️ 리뷰 생성'과 별개 (세션 키 bt_ 접두사)
+    st.title("🧪 리뷰생성 베타버전")
+    st.caption("체험단원에게 나눠 줄 **참고용 예시**입니다. 체험단원이 직접 사용해 본 경험에 맞게 고쳐서 작성하도록 안내해 주세요.")
+    ss_ = st.session_state
+    ss_.setdefault("bt_reviews", [])          # [{"num":1,"content":"...","chars":150}]
+    ss_.setdefault("bt_rows", [{"id": 0}])
+    ss_.setdefault("bt_next", 1)
+
+    st.markdown("### 📦 STEP 1 — 제품 정보")
+    _bl, _br = st.columns([2, 1])
+    with _bl:
+        bt_info = st.text_area("제품 정보 (제품명, 카테고리, 특징 등)", height=140, key="bt_info")
+        bt_points = st.text_area("소구점 / 강조할 내용", height=90, key="bt_points", placeholder="예) 흡수 빠름, 끈적임 없음, 대용량")
+        bt_request = st.text_area("작업자 요청사항", height=70, key="bt_request", placeholder="예) 향 언급은 가볍게 / 사용 기간은 2주 기준")
+        bt_kw_text = st.text_input("필수 키워드 (쉼표로 구분)", key="bt_kw", placeholder="예) PDRN크림, 재생크림")
+    with _br:
+        bt_images = st.file_uploader("제품 이미지 (선택)", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True, key="bt_imgs")
+        if bt_images:
+            for _im in bt_images:
+                st.image(_im, caption=_im.name, use_container_width=True)
+
+    st.markdown("### ⚙️ STEP 2 — 설정 (설정마다 개수·글자수 따로 적용)")
+    for _row in list(ss_.bt_rows):
+        _id = _row["id"]
+        _c1, _c2, _c3 = st.columns([4, 4, 1])
+        _c1.number_input("리뷰 개수", min_value=1, max_value=200, value=10, step=1, key=f"bt_rc_{_id}")
+        _c2.number_input("리뷰당 글자 수", min_value=10, max_value=500, value=150, step=10, key=f"bt_cc_{_id}",
+                         help="50자 이하면 그 글자수를 넘지 않게, 그 이상이면 ±20% 범위로 맞춥니다.")
+        with _c3:
+            st.write(""); st.write("")
+            if len(ss_.bt_rows) > 1 and st.button("🗑️", key=f"bt_del_{_id}"):
+                ss_.bt_rows = [r for r in ss_.bt_rows if r["id"] != _id]
+                st.rerun()
+    if st.button("➕ 설정 추가", key="bt_add"):
+        ss_.bt_rows.append({"id": ss_.bt_next}); ss_.bt_next += 1
+        st.rerun()
+    _plan = [(ss_.get(f"bt_rc_{r['id']}", 10), ss_.get(f"bt_cc_{r['id']}", 150)) for r in ss_.bt_rows]
+    st.caption("💡 " + " + ".join(f"{n}개×{c}자" for n, c in _plan) + f" = 총 {sum(n for n, _ in _plan)}개")
+
+    bt_keywords = _beta_keywords(bt_kw_text)
+    if st.button("🚀 리뷰 생성 시작", type="primary", use_container_width=True, key="bt_go"):
+        if not bt_info.strip():
+            st.error("❌ 제품 정보를 입력해주세요!")
+        else:
+            try:
+                _cl = get_anthropic_client()
+                _imgs = []
+                _mt = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+                for _im in (bt_images or []):
+                    _im.seek(0)
+                    _imgs.append({"media_type": _mt.get(_im.name.split('.')[-1].lower(), "image/jpeg"),
+                                  "data": base64.b64encode(_im.read()).decode("utf-8")})
+                _img_desc = analyze_images_with_claude(_cl, _imgs) if _imgs else ""
+                _bar = st.progress(0); _stt = st.empty()
+                _all, _off = [], 0
+                for _si, (_n, _c) in enumerate(_plan):
+                    _stt.text(f"🚀 설정 {_si + 1}/{len(_plan)} — {_n}개 × {_c}자 생성 중...")
+                    _res = generate_reviews_beta(_cl, bt_info, bt_points, bt_request, bt_keywords, _n, _c, _img_desc,
+                        progress_callback=lambda b, tb, g, _s=_si: _bar.progress(min(int((_s + b / max(tb, 1)) / len(_plan) * 100), 99)))
+                    for _, _content in _res:
+                        _off += 1
+                        _all.append({"num": _off, "content": _content, "chars": _c})
+                _bar.progress(100); _stt.empty()
+                ss_.bt_reviews = _all
+                for _k in [k for k in ss_.keys() if str(k).startswith("bt_edit_")]:
+                    del ss_[_k]
+                st.success(f"✅ 총 {len(_all)}개 생성 완료 (글자수·키워드 기준에 안 맞는 리뷰는 자동으로 한 번 더 고쳤습니다)")
+            except Exception as _e:
+                st.error(f"❌ 생성 실패: {_e}")
+
+    if ss_.bt_reviews:
+        st.markdown("---")
+        _bad = sum(1 for r in ss_.bt_reviews if _beta_check(r["content"], r["chars"], bt_keywords))
+        st.markdown(f"### 📋 STEP 3 — 결과 확인 ({len(ss_.bt_reviews)}개" + (f", ⚠️ 기준 미달 {_bad}개)" if _bad else ")"))
+
+        st.markdown("**✏️ 요청으로 수정하기** — 예) `5번 리뷰 마지막 문장에서 가격 얘기 빼줘` · `3, 7번 더 짧게` · `10~12번 사용감 위주로`")
+        _q1, _q2 = st.columns([5, 1])
+        bt_req = _q1.text_input("수정 요청", key="bt_req_text", label_visibility="collapsed", placeholder="몇 번 리뷰를 어떻게 고칠지 적어 주세요")
+        if _q2.button("수정 반영", key="bt_req_go", use_container_width=True):
+            _nums = set()
+            for _a, _b in re.findall(r"(\d+)\s*[~\-]\s*(\d+)\s*번?", bt_req):
+                _nums.update(range(int(_a), int(_b) + 1))
+            _rest = re.sub(r"\d+\s*[~\-]\s*\d+", " ", bt_req)
+            _nums.update(int(x) for x in re.findall(r"(\d+)\s*(?=번|,|\s*리뷰|$)", _rest))
+            _valid = {r["num"] for r in ss_.bt_reviews}
+            _nums = sorted(n for n in _nums if n in _valid)
+            if not bt_req.strip():
+                st.warning("수정 요청을 적어 주세요.")
+            elif not _nums:
+                st.warning("몇 번 리뷰인지 번호를 함께 적어 주세요. (예: 5번 …)")
+            else:
+                with st.spinner(f"{', '.join(map(str, _nums))}번 리뷰 수정 중..."):
+                    try:
+                        _cl = get_anthropic_client()
+                        _cur = {r["num"]: r for r in ss_.bt_reviews}
+                        for _k in _nums:   # 화면에서 직접 고친 내용도 반영
+                            _cur[_k]["content"] = ss_.get(f"bt_edit_{_k}", _cur[_k]["content"])
+                        _by = {}
+                        for _k in _nums:
+                            _by.setdefault(_cur[_k]["chars"], []).append((_k, _cur[_k]["content"]))
+                        for _chars, _tg in _by.items():
+                            _new = revise_reviews_beta(_cl, _tg, bt_req, bt_info, _beta_rules(_chars, bt_keywords, bt_points, bt_request))
+                            for _k, _c in _new:
+                                _cur[_k]["content"] = _c
+                                ss_[f"bt_edit_{_k}"] = _c
+                        st.success(f"✅ {', '.join(map(str, _nums))}번 리뷰만 수정했습니다.")
+                    except Exception as _e:
+                        st.error(f"❌ 수정 실패: {_e}")
+
+        for _i, _r in enumerate(ss_.bt_reviews):
+            _iss = _beta_check(ss_.get(f"bt_edit_{_r['num']}", _r["content"]), _r["chars"], bt_keywords)
+            with st.expander(f"리뷰 {_r['num']}번 · {_r['chars']}자 기준" + (f" · ⚠️ {' / '.join(_iss)}" if _iss else ""), expanded=(_i < 3)):
+                ss_.setdefault(f"bt_edit_{_r['num']}", _r["content"])
+                st.text_area(f"리뷰 {_r['num']}", height=130, key=f"bt_edit_{_r['num']}", label_visibility="collapsed")
+
+        st.markdown("---")
+        st.markdown("### 💾 STEP 4 — 저장 및 다운로드")
+        _final = [(r["num"], ss_.get(f"bt_edit_{r['num']}", r["content"])) for r in ss_.bt_reviews]
+        _d1, _d2 = st.columns([3, 1])
+        _d1.download_button("📥 엑셀 다운로드", data=create_excel(_final), file_name=f"리뷰_베타_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, type="primary", key="bt_dl")
+        if _d2.button("🔄 초기화", use_container_width=True, key="bt_reset"):
+            ss_.bt_reviews = []
+            for _k in [k for k in ss_.keys() if str(k).startswith("bt_edit_")]:
+                del ss_[_k]
+            st.rerun()
+        with st.expander("📄 텍스트 전체 보기 (복사용)"):
+            st.text_area("전체", value="\n\n".join(f"{n}.\n{c}" for n, c in _final), height=400, label_visibility="collapsed", key="bt_all")
 
 elif menu == "📝 리뷰 입력":
     st.title("📝 리뷰 엑셀 자동 변환기")
