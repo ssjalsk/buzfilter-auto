@@ -2356,7 +2356,6 @@ with st.sidebar:
         "🏭 버즈필터 발주",
         "🚚 위탁 발주",
         "✍️ 리뷰 생성",
-        "📘 리뷰 톤 가이드",
         "📝 리뷰 입력",
         "📄 견적서 생성",
         "🖼️ 상세페이지 제작",
@@ -2605,99 +2604,6 @@ elif menu == "✍️ 리뷰 생성":
             for num, content in st.session_state.generated_reviews:
                 full_text += f"{num}.\n{content}\n\n"
             st.text_area("전체 리뷰 텍스트", value=full_text.strip(), height=400, label_visibility="collapsed")
-
-elif menu == "📘 리뷰 톤 가이드":
-    # [2026-11-13] 체험단·팀 내부 참고용 가이드 — 완성 리뷰 대량 생성 아님(예시는 한 문장 단위 소수)
-    st.title("📘 리뷰 톤 가이드")
-    st.caption("체험단원·팀원이 **직접 사용해 보고 쓸 때** 참고하는 가이드입니다. 소구점·키워드·톤 기준·금지 표현·협찬 표기를 한 장으로 정리합니다.")
-
-    _g1, _g2 = st.columns(2)
-    with _g1:
-        _tg_name = st.text_input("제품명", key="tg_name", placeholder="예: 닥터 소이담 PDRN 리페어크림")
-        _tg_platform = st.selectbox("플랫폼", ["쿠팡", "네이버", "당근마켓", "지마켓", "옥션", "올리브영", "기타"], key="tg_platform")
-        _tg_info = st.text_area("제품 정보", height=150, key="tg_info", placeholder="성분, 용량, 특징, 사용법 등 상세페이지 핵심 내용")
-        _tg_points = st.text_area("강조할 소구점 (한 줄에 하나)", height=110, key="tg_points", placeholder="예:\n흡수가 빠름\n끈적임 없음\n대용량이라 오래 씀")
-    with _g2:
-        _tg_keywords = st.text_input("필수 키워드 (쉼표로 구분)", key="tg_keywords", placeholder="예: PDRN크림, 재생크림, 수분크림")
-        _tg_request = st.text_area("작업자 요청사항", height=90, key="tg_request", placeholder="예: 사진은 손등 발림샷 위주 / 향 언급은 가볍게")
-        _tg_disclose = st.text_input("협찬 표기 문구", value="본 후기는 제품을 제공받아 직접 사용해 보고 작성했습니다.", key="tg_disclose")
-        _c1, _c2 = st.columns(2)
-        _tg_min = _c1.number_input("권장 글자수 (최소)", min_value=10, max_value=2000, value=50, step=10, key="tg_min")
-        _tg_max = _c2.number_input("권장 글자수 (최대)", min_value=10, max_value=3000, value=200, step=10, key="tg_max")
-        _tg_ban_extra = st.text_input("추가 금지 표현 (선택)", key="tg_ban", placeholder="예: 경쟁사 제품명, 가격 언급")
-
-    with st.expander("📌 기본 톤 기준 (모든 가이드에 자동 포함)", expanded=False):
-        st.markdown("""
-- 존댓말·존칭 위주
-- '~요'로만 끝내지 말고 '~습니다 / ~합니다' 같은 '~다' 마무리도 섞기
-- ^^ ㅎㅎ !! 같은 표현은 **일부 리뷰에만** 자연스럽게 (전부 쓰지 않기)
-- 제품 이야기가 중심 — 여러 컨셉·사연 넣지 않기
-- 필수 키워드는 모두 자연스럽게 포함
-- 나이트·약국·살롱 같은 제품과 무관한 TMI 금지, 목적에서 벗어난 내용 금지
-- 문장 중간을 쉼표로 끊어 나열하지 않기
-- 협찬 표기 문구 반드시 포함
-""")
-
-    def _tg_build_prompt():
-        _ban = "제품과 무관한 TMI(나이트·약국·살롱 등 장소·사생활 이야기), 목적에서 벗어난 내용, 문장 중간을 쉼표로 끊어 나열하기, 과장·최초·유일 표현, 효능을 단정하는 의학적 표현"
-        if _tg_ban_extra.strip():
-            _ban += ", " + _tg_ban_extra.strip()
-        return f"""너는 체험단 운영 매니저다. 아래 제품에 대해 체험단원과 팀원이 **직접 사용해 본 경험으로 리뷰를 쓸 때 참고할 가이드**를 한국어로 작성해라.
-
-[중요 규칙]
-- 완성된 리뷰 전문을 쓰지 마라. 예시는 반드시 '한 문장' 단위로만, 항목당 1개씩만 제시한다.
-- 실제로 사용해 보고 느낀 점을 쓰도록 안내하는 문서다. 특정 인물·성별·연령을 흉내 내는 예시는 만들지 마라.
-- 과장·허위 효능 표현은 예시에도 쓰지 마라.
-
-[제품] {_tg_name}  /  플랫폼: {_tg_platform}
-[제품 정보]
-{_tg_info}
-[강조할 소구점]
-{_tg_points}
-[필수 키워드] {_tg_keywords}
-[작업자 요청사항] {_tg_request or '없음'}
-[권장 글자수] {_tg_min}~{_tg_max}자
-[협찬 표기 문구] {_tg_disclose}
-[금지 표현] {_ban}
-
-[출력 형식 — 이 순서와 제목 그대로, 마크다운]
-## 1. 제품 한 줄 소개
-## 2. 꼭 다룰 소구점
-(소구점마다: 무엇을 확인하고 쓰면 좋은지 1줄 + "표현 예시:" 한 문장)
-## 3. 필수 키워드 넣는 법
-(키워드별로 자연스럽게 들어갈 위치 팁 1줄)
-## 4. 톤 기준
-(존댓말 / '~요'와 '~다' 마무리를 섞는 법 — 같은 내용을 '~요' 한 문장, '~다' 한 문장으로 짧게 비교 / 이모티콘은 일부만 / 쉼표로 끊지 않기)
-## 5. 작업자 요청사항
-## 6. 금지 표현
-## 7. 협찬 표기
-(문구 그대로 + 리뷰 맨 끝에 넣으라고 안내)
-## 8. 제출 전 체크리스트
-(체크박스 형식 - [ ] 로 6~8개: 키워드 포함, 글자수 {_tg_min}~{_tg_max}자, 협찬 표기, 금지 표현 없음, 직접 사용 경험, 쉼표 나열 없음 등)
-"""
-
-    if st.button("📘 가이드 만들기", type="primary", key="tg_btn"):
-        if not _tg_name.strip() or not (_tg_info.strip() or _tg_points.strip()):
-            st.warning("제품명과 제품 정보(또는 소구점)를 입력해 주세요.")
-        else:
-            with st.spinner("가이드 작성 중..."):
-                try:
-                    _resp = get_anthropic_client().messages.create(
-                        model="claude-sonnet-4-6", max_tokens=3000,
-                        messages=[{"role": "user", "content": _tg_build_prompt()}])
-                    st.session_state.tg_result = _resp.content[0].text.strip()
-                    st.session_state.tg_result_name = _tg_name.strip()
-                except Exception as _e:
-                    st.error(f"가이드 생성 실패: {_e}")
-
-    if st.session_state.get("tg_result"):
-        st.markdown("---")
-        st.subheader(f"📄 {st.session_state.get('tg_result_name', '')} 리뷰 톤 가이드")
-        st.markdown(st.session_state.tg_result)
-        with st.expander("📋 복사용 텍스트 (수정 가능)"):
-            st.text_area("가이드 전체", value=st.session_state.tg_result, height=420, key="tg_copy", label_visibility="collapsed")
-        st.download_button("⬇️ 가이드 다운로드 (.txt)", data=st.session_state.tg_result.encode("utf-8"),
-                           file_name=f"리뷰톤가이드_{st.session_state.get('tg_result_name', '제품')}.txt", mime="text/plain", key="tg_dl")
 
 elif menu == "📝 리뷰 입력":
     st.title("📝 리뷰 엑셀 자동 변환기")
