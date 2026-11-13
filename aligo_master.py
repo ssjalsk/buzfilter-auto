@@ -2625,6 +2625,7 @@ elif menu == "📘 리뷰 톤 가이드":
         _tg_min = _c1.number_input("권장 글자수 (최소)", min_value=10, max_value=2000, value=50, step=10, key="tg_min")
         _tg_max = _c2.number_input("권장 글자수 (최대)", min_value=10, max_value=3000, value=200, step=10, key="tg_max")
         _tg_ban_extra = st.text_input("추가 금지 표현 (선택)", key="tg_ban", placeholder="예: 경쟁사 제품명, 가격 언급")
+        _tg_examples = st.checkbox("참고 예시 리뷰 3개 포함 (체험단원이 보고 직접 경험으로 고쳐 쓰는 용도)", value=True, key="tg_examples")
 
     with st.expander("📌 기본 톤 기준 (모든 가이드에 자동 포함)", expanded=False):
         st.markdown("""
@@ -2642,10 +2643,20 @@ elif menu == "📘 리뷰 톤 가이드":
         _ban = "제품과 무관한 TMI(나이트·약국·살롱 등 장소·사생활 이야기), 목적에서 벗어난 내용, 문장 중간을 쉼표로 끊어 나열하기, 과장·최초·유일 표현, 효능을 단정하는 의학적 표현"
         if _tg_ban_extra.strip():
             _ban += ", " + _tg_ban_extra.strip()
+        _ex_rule = ("- 1~8번 항목의 예시는 '한 문장' 단위로만, 항목당 1개씩만 제시한다. 완성된 리뷰 형태는 9번 '참고 예시 리뷰'에만 쓴다."
+                    if _tg_examples else
+                    "- 완성된 리뷰 전문을 쓰지 마라. 예시는 반드시 '한 문장' 단위로만, 항목당 1개씩만 제시한다.")
+        _ex_section = (f"""
+## 9. 참고 예시 리뷰 (3개)
+(맨 위에 굵게: "⚠️ 아래는 소구점·키워드를 어떻게 담는지 보여 주는 참고 예시입니다. 그대로 복사하지 말고 직접 사용해 본 경험으로 바꿔 작성해 주세요.")
+(예시 A 짧은형 / 예시 B 소구점 중심형 / 예시 C 사용 과정형 — 구성만 다르게. 각 {_tg_min}~{_tg_max}자, 필수 키워드 모두 포함, 소구점을 구체적으로, 존댓말,
+ A·B·C 중 일부는 '~요', 일부는 '~습니다/~합니다'로 마무리, 이모티콘(^^ ㅎㅎ !!)은 한 개 예시에만 가볍게, 쉼표로 문장 끊어 나열 금지, 마지막 줄에 협찬 표기 문구.
+ 특정 성별·연령·인물 설정은 넣지 말고 제품 사용 이야기만.)
+""" if _tg_examples else "")
         return f"""너는 체험단 운영 매니저다. 아래 제품에 대해 체험단원과 팀원이 **직접 사용해 본 경험으로 리뷰를 쓸 때 참고할 가이드**를 한국어로 작성해라.
 
 [중요 규칙]
-- 완성된 리뷰 전문을 쓰지 마라. 예시는 반드시 '한 문장' 단위로만, 항목당 1개씩만 제시한다.
+{_ex_rule}
 - 실제로 사용해 보고 느낀 점을 쓰도록 안내하는 문서다. 특정 인물·성별·연령을 흉내 내는 예시는 만들지 마라.
 - 과장·허위 효능 표현은 예시에도 쓰지 마라.
 
@@ -2674,7 +2685,7 @@ elif menu == "📘 리뷰 톤 가이드":
 (문구 그대로 + 리뷰 맨 끝에 넣으라고 안내)
 ## 8. 제출 전 체크리스트
 (체크박스 형식 - [ ] 로 6~8개: 키워드 포함, 글자수 {_tg_min}~{_tg_max}자, 협찬 표기, 금지 표현 없음, 직접 사용 경험, 쉼표 나열 없음 등)
-"""
+{_ex_section}"""
 
     if st.button("📘 가이드 만들기", type="primary", key="tg_btn"):
         if not _tg_name.strip() or not (_tg_info.strip() or _tg_points.strip()):
@@ -2683,7 +2694,7 @@ elif menu == "📘 리뷰 톤 가이드":
             with st.spinner("가이드 작성 중..."):
                 try:
                     _resp = get_anthropic_client().messages.create(
-                        model="claude-sonnet-4-6", max_tokens=3000,
+                        model="claude-sonnet-4-6", max_tokens=4500 if _tg_examples else 3000,
                         messages=[{"role": "user", "content": _tg_build_prompt()}])
                     st.session_state.tg_result = _resp.content[0].text.strip()
                     st.session_state.tg_result_name = _tg_name.strip()
