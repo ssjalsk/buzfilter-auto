@@ -2847,12 +2847,43 @@ elif menu == "🧪 리뷰생성 베타버전":
 
     if ss_.bt_reviews:
         st.markdown("---")
-        _bad = sum(1 for r in ss_.bt_reviews if _beta_check(r["content"], r["chars"], bt_keywords))
+        _bt_now = lambda r: ss_.get(f"bt_edit_{r['num']}", r["content"])   # 화면에서 고친 내용 기준
+        _bad_list = [r for r in ss_.bt_reviews if _beta_check(_bt_now(r), r["chars"], bt_keywords)]
+        _bad = len(_bad_list)
         st.markdown(f"### 📋 STEP 3 — 결과 확인 ({len(ss_.bt_reviews)}개" + (f", ⚠️ 기준 미달 {_bad}개)" if _bad else ")"))
+        if ss_.get("bt_fixall_msg"):
+            st.success(ss_.pop("bt_fixall_msg"))
 
         st.markdown("**✏️ 요청으로 수정하기** — 예) `5번 리뷰 마지막 문장에서 가격 얘기 빼줘` · `3, 7번 더 짧게` · `10~12번 사용감 위주로`")
-        _q1, _q2 = st.columns([5, 1])
+        st.caption("⚠️ 기준 미달 전체 수정: 기준 미달 리뷰만 한 번에 글자수·키워드 기준에 맞게 고칩니다. 입력칸에 요청을 적으면 함께 반영됩니다 (번호는 안 적어도 됨).")
+        _q1, _q2, _q3 = st.columns([4, 1, 1.4])
         bt_req = _q1.text_input("수정 요청", key="bt_req_text", label_visibility="collapsed", placeholder="몇 번 리뷰를 어떻게 고칠지 적어 주세요")
+        if _q3.button(f"⚠️ 기준 미달 전체 수정 ({_bad}개)", key="bt_fixall_go", use_container_width=True, disabled=not _bad):
+            _instr = "규칙(특히 글자수 범위와 필수 키워드)에 맞게 다시 써 주세요."
+            if bt_req.strip():
+                _instr += f"\n추가 요청: {bt_req.strip()}"
+            _groups = {}
+            for _r in _bad_list:
+                _groups.setdefault(_r["chars"], []).append(_r)
+            _jobs = [(_c, _g[i:i + 20]) for _c, _g in _groups.items() for i in range(0, len(_g), 20)]
+            _prog = st.progress(0.0, text=f"기준 미달 {_bad}개 수정 중...")
+            try:
+                _cl = get_anthropic_client()
+                for _ji, (_chars, _chunk) in enumerate(_jobs):
+                    _tg = [(_r["num"], _bt_now(_r)) for _r in _chunk]
+                    _new = revise_reviews_beta(_cl, _tg, _instr, bt_info, _beta_rules(_chars, bt_keywords, bt_points, bt_request),
+                                               issues={n: _beta_check(c, _chars, bt_keywords) for n, c in _tg})
+                    _nd = dict(_new)
+                    for _r in _chunk:
+                        _r["content"] = _nd.get(_r["num"], _r["content"])
+                        ss_[f"bt_edit_{_r['num']}"] = _r["content"]
+                    _prog.progress((_ji + 1) / len(_jobs), text=f"수정 중... {_ji + 1}/{len(_jobs)}")
+                _left = sum(1 for r in ss_.bt_reviews if _beta_check(_bt_now(r), r["chars"], bt_keywords))
+                ss_["bt_fixall_msg"] = f"✅ 기준 미달 {_bad}개 수정 완료" + (f" — 아직 {_left}개 남음 (버튼을 한 번 더 누르면 남은 것만 다시 고칩니다)" if _left else " — 모두 기준 충족")
+            except Exception as _e:
+                st.error(f"❌ 수정 실패: {_e}")
+            if ss_.get("bt_fixall_msg"):
+                st.rerun()   # 제목의 미달 개수·버튼 숫자 갱신
         if _q2.button("수정 반영", key="bt_req_go", use_container_width=True):
             _nums = set()
             for _a, _b in re.findall(r"(\d+)\s*[~\-]\s*(\d+)\s*번?", bt_req):
