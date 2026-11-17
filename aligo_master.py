@@ -2933,7 +2933,8 @@ elif menu == "🧪 리뷰생성 베타버전":
                 del ss_[_k]
             st.rerun()
         with st.expander("📄 텍스트 전체 보기 (복사용)"):
-            st.text_area("전체", value="\n\n".join(f"{n}.\n{c}" for n, c in _final), height=400, label_visibility="collapsed", key="bt_all")
+            ss_["bt_all"] = "\n\n".join(f"{n}.\n{c}" for n, c in _final)   # key 위젯은 처음 값을 기억하므로 매번 최신 내용으로 덮어씀
+            st.text_area("전체", height=400, label_visibility="collapsed", key="bt_all")
 
 elif menu == "📝 리뷰 입력":
     st.title("📝 리뷰 엑셀 자동 변환기")
